@@ -1,0 +1,28 @@
+name: Process automation jobs
+
+# Vercel Hobby only allows once-daily cron jobs, and this worker needs to
+# run every few minutes (notifications, Sheets/Facebook sync, Phase 8's
+# verification reminders) — so this repo drives it from GitHub Actions
+# instead of vercel.json, staying on the free Vercel plan. See
+# DEPLOYMENT.md for the two required repo secrets.
+#
+# Caveats, stated plainly: GitHub's own docs note scheduled workflows can
+# be delayed (sometimes by several minutes) during periods of high
+# platform load, and GitHub disables scheduled workflows automatically
+# after 60 days with no commits to the repo — re-enable it manually
+# (Actions tab → this workflow → "Enable workflow") if that happens.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  process-jobs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the automation worker
+        run: |
+          curl --fail-with-body --silent --show-error \
+            -X GET "${{ secrets.SITE_URL }}/api/cron/process-jobs" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"

@@ -79,14 +79,25 @@ deliberately deferred rather than silently absent.
   breakpoint usage throughout held up. Authenticated, data-backed pages
   couldn't be checked this way for the same reason they can't be manually
   clicked through: no live Supabase project exists in this sandbox.
-- **Deployment runbook** (`DEPLOYMENT.md`) and `vercel.json` (the cron
-  entry the README has said "add it when you deploy" about since Phase
-  5) — a concrete, in-order sequence: provision Supabase, set every env
-  var, deploy, bootstrap the first admin against the *real* project, then
-  a verification checklist covering everything that was structurally
-  impossible to verify in this sandbox (real email delivery, a real
+- **Deployment runbook** (`DEPLOYMENT.md`) — a concrete, in-order
+  sequence: provision Supabase, set every env var, deploy, bootstrap the
+  first admin against the *real* project, then a verification checklist
+  covering everything that was structurally impossible to verify in this
+  sandbox (real email delivery, a real
   Google Sheets/Facebook connection, the cron job actually firing on
   schedule).
+
+**Post-write correction, found only once an actual Vercel deploy was
+attempted**: this phase originally shipped a `vercel.json` with a
+`crons` entry running every 5 minutes. Vercel rejected the deploy —
+Hobby-plan accounts only allow once-daily cron jobs, a limit this
+sandbox had no way to hit since it never had a real Vercel project to
+deploy to. Fixed by deleting `vercel.json` and driving the worker from a
+GitHub Actions scheduled workflow instead
+(`.github/workflows/cron-process-jobs.yml`), which needs no paid plan.
+`DEPLOYMENT.md` documents the two repository secrets it needs
+(`SITE_URL`, `CRON_SECRET`) and the option to swap back to Vercel's own
+cron if the project ever upgrades to Pro.
 
 ## Status: Phase 9 — Reports, Audit, Automation Center (complete)
 
@@ -436,14 +447,23 @@ specifically so Phase 6/7 can introduce new job types without a migration.
 Add a `CRON_SECRET` environment variable in your deployment (generate one
 with `openssl rand -hex 32`), then either:
 
-- **Vercel Cron**: `vercel.json` (Phase 10) already has a `crons` entry
-  pointing at `/api/cron/process-jobs` every 5 minutes — Vercel sends the
-  `Authorization` header automatically once `CRON_SECRET` is set on the
-  project. Note Vercel's Hobby plan only allows once-daily cron; every-5-
-  minutes needs Pro (or swap in an external scheduler per the next bullet
-  while staying on Hobby).
+- **GitHub Actions (what this repo actually uses)**:
+  `.github/workflows/cron-process-jobs.yml` hits
+  `/api/cron/process-jobs` every 5 minutes. Add two repository secrets —
+  `SITE_URL` (`https://<your-domain>`) and `CRON_SECRET` (same value as
+  the Vercel env var) — under Settings → Secrets and variables → Actions,
+  and it starts running on schedule. No paid plan required.
+- **Vercel Cron**: only an option on Vercel **Pro** or higher — its
+  Hobby plan allows once-daily cron jobs only, which rejects a
+  `vercel.json` asking for every 5 minutes (found the hard way: an
+  earlier version of this repo shipped exactly that `vercel.json`, and
+  Vercel refused the deploy). If you're on Pro, add a `vercel.json` with
+  a `crons` entry pointing at the same path and remove the GitHub Actions
+  workflow — Vercel sends the `Authorization` header automatically once
+  `CRON_SECRET` is set on the project.
 - **Any other scheduler**: hit the same URL with
-  `Authorization: Bearer <CRON_SECRET>` on your own interval.
+  `Authorization: Bearer <CRON_SECRET>` on your own interval — a free
+  service like cron-job.org works too.
 
 See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for the full go-live sequence.
 
@@ -812,9 +832,14 @@ supabase/
   seed/               LOCAL POSTGRES TEST FIXTURES ONLY — do not run against Supabase
 scripts/
   bootstrap-admin.ts  one-time first-admin promotion (service role)
-vercel.json           cron schedule for /api/cron/process-jobs (Phase 10)
+.github/workflows/
+  cron-process-jobs.yml  drives /api/cron/process-jobs every 5 minutes —
+                          GitHub Actions rather than Vercel Cron, since
+                          Vercel's free Hobby plan only allows once-daily
+                          cron (Phase 10)
 DEPLOYMENT.md          go-live runbook: Supabase setup, env vars, deploy,
-                       bootstrap, verification checklist (Phase 10)
+                       worker schedule, bootstrap, verification checklist
+                       (Phase 10)
 ```
 
 ## Verification performed
@@ -933,9 +958,11 @@ Facebook Graph API (no default/placeholder credential exists for it at
 all, by design — every organization starts `DISCONNECTED` with a null
 `access_token` until an admin pastes one in; `src/lib/facebook/graph.ts`'s
 actual HTTP calls are unexercised until a real Page + token exist), and —
-specific to Phase 10 — an actual Vercel deployment (`vercel.json`'s cron
-entry has never fired for real), the rate limiter's behavior under Vercel's
-actual multi-instance concurrency (only its single-process algorithm was
+specific to Phase 10 — an actual successful Vercel deployment (the first
+real attempt is what surfaced the Hobby-plan cron rejection documented
+above; the GitHub Actions workflow that replaced it has likewise never
+fired for real yet), the rate limiter's behavior under Vercel's actual
+multi-instance concurrency (only its single-process algorithm was
 verified — see above), any authenticated/data-backed page's responsive
 behavior on a real device (the Playwright pass covered only the
 backend-independent public pages), and the `DEPLOYMENT.md` runbook itself,

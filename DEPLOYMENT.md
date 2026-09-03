@@ -1,11 +1,19 @@
 # Deployment Runbook
 
 The concrete, in-order sequence for taking this from a local checkout to a
-live deployment. Written for Vercel (the platform its `vercel.json`/cron
-convention already targets) + Supabase, since that's the stack this app
-already assumes throughout — see the main `README.md` for architecture
-context, and this file's own "Known scaling considerations" at the bottom
-for what to revisit once real usage exists.
+live deployment. Written for Vercel + Supabase, since that's the stack
+this app already assumes throughout — see the main `README.md` for
+architecture context, and this file's own "Known scaling considerations"
+at the bottom for what to revisit once real usage exists.
+
+The background worker (`/api/cron/process-jobs`) is scheduled via a GitHub
+Actions workflow (`.github/workflows/cron-process-jobs.yml`), not Vercel
+Cron — Vercel's free Hobby plan only allows once-daily cron jobs, and this
+worker needs to run every few minutes. If you're on Vercel Pro (or another
+host with real cron support) you can point its scheduler at the same URL
+instead and disable the GitHub Actions workflow; the app itself doesn't
+care who calls it, only that the `Authorization: Bearer $CRON_SECRET`
+header is correct.
 
 ## 1. Provision Supabase
 
@@ -55,10 +63,35 @@ account can read every org's distinct spreadsheet.
    automatically.
 2. Set the environment variables from step 2 before the first deploy (or
    redeploy after setting them).
-3. `vercel.json` already configures the cron job — nothing else to wire
-   up for it beyond `CRON_SECRET` being set.
 
-## 4. Bootstrap the first admin
+## 4. Set up the background worker schedule
+
+The repo's `.github/workflows/cron-process-jobs.yml` calls
+`/api/cron/process-jobs` every 5 minutes via GitHub Actions. To activate
+it:
+
+1. In the GitHub repo, go to Settings → Secrets and variables → Actions,
+   and add two repository secrets:
+   - `SITE_URL` — `https://<your-domain>` (no trailing slash)
+   - `CRON_SECRET` — the exact same value set on Vercel in step 2
+2. The workflow starts running on its schedule automatically once those
+   secrets exist (GitHub Actions picks up `schedule` triggers as soon as
+   the workflow file is on the default branch). To confirm it's live
+   without waiting up to 5 minutes, trigger it manually: Actions tab →
+   "Process automation jobs" → "Run workflow".
+3. Known caveats, not silently glossed over: GitHub can delay scheduled
+   runs by several minutes during periods of high platform load, and
+   GitHub **disables scheduled workflows automatically after 60 days with
+   no commits to the repo** — if jobs stop processing after a long quiet
+   period, check Actions → this workflow for a "workflow disabled" banner
+   and re-enable it there.
+4. If you'd rather not depend on GitHub Actions at all: any scheduler that
+   can hit a URL on an interval works identically — a free service like
+   cron-job.org, or (if upgrading) Vercel Pro's own `vercel.json` cron
+   support. Point it at the same URL with the same header and delete the
+   GitHub Actions workflow.
+
+## 5. Bootstrap the first admin
 
 Every admin action requires an existing privileged user, so the very
 first one can't be created through the app UI:
@@ -76,7 +109,7 @@ first one can't be created through the app UI:
    on scoping" for why global, not org-scoped, is usually what you want
    for this first account) and optionally creates the first organization.
 
-## 5. Post-deploy verification checklist
+## 6. Post-deploy verification checklist
 
 Work through this once, live, before pointing real users at the
 deployment — everything here was necessarily unverifiable in the sandbox
@@ -99,8 +132,11 @@ first time any of it runs for real:
       headers from `next.config.ts`
 - [ ] Manually trigger `/api/cron/process-jobs` once with
       `Authorization: Bearer $CRON_SECRET` and confirm a 200 with real
-      `succeeded`/`failed` counts (not an error) — then let it run on
-      schedule and check `/admin/automation` shows activity
+      `succeeded`/`failed` counts (not an error)
+- [ ] Run the GitHub Actions workflow manually once (Actions → "Process
+      automation jobs" → "Run workflow") and confirm it succeeds with the
+      `SITE_URL`/`CRON_SECRET` secrets set — then leave it on its 5-minute
+      schedule and check `/admin/automation` shows activity over time
 - [ ] (If using Phase 6) Connect a real Google Sheet, run "Test
       connection", confirm the header row appears
 - [ ] (If using Phase 7) Connect a real Facebook Page, run "Test
@@ -108,7 +144,7 @@ first time any of it runs for real:
 - [ ] Confirm the public inquiry/viewing forms reject a 6th submission
       within 10 minutes from the same IP (the Phase 10 rate limiter)
 
-## 6. Ongoing operations
+## 7. Ongoing operations
 
 - Check `/admin/automation` periodically for jobs stuck in "Needs
   attention" — each one has a Retry button once the underlying cause
