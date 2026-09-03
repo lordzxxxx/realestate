@@ -16,6 +16,7 @@ const PROTECTED_PREFIXES = [
   '/inquiries',
   '/viewings',
   '/notifications',
+  '/reports',
 ];
 
 function isProtectedPath(pathname: string): boolean {

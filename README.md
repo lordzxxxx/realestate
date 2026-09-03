@@ -10,6 +10,54 @@ Full requirements: see the project brief this was built from (not included
 in this repo). Build proceeds phase-by-phase; each phase is fully working
 before the next starts — no placeholder CRUD, no fake "synced" statuses.
 
+## Status: Phase 9 — Reports, Audit, Automation Center (complete)
+
+Three observability surfaces on top of data that has existed since Phase 5
+but was deliberately backend-only until now — Phase 5's own comment said
+it plainly: "`automation_events`/`sync_jobs`/`integration_logs` stay
+backend-only... until Phase 9 builds the actual Automation Center on top
+of them." No new tables, no new migration — this phase is entirely
+application code over existing schema and existing RLS.
+
+- **Reports** (`/reports`, `src/lib/reports/`) — scoped deliberately
+  narrow per this phase's own decision: operational aggregates only
+  (listings by status, active listing value, verification compliance %,
+  inquiries/viewings funnels), no agent-performance metrics. Every query is
+  a plain authenticated `select` with **no manual own/organization/all
+  branching in application code** — `listings_select`/`inquiries_select`/
+  `viewing_requests_select`'s RLS policies (already keyed off
+  `listing.read_*`/`inquiry.view_*`/`viewing.view`, which the same roles
+  hold alongside their `reports.*` grants) already scope exactly which
+  rows a given session can aggregate over. Reimplementing that scoping
+  here would just be a second, driftable copy of a decision the database
+  already makes correctly — the page only checks `reports.view_own/
+  organization/all` (via `canAny()` over `getMyPermissions()`, the same
+  "any org" check nav visibility already uses) to decide whether to render
+  at all. `reports.export` is a distinct, narrower permission several
+  seeded roles deliberately don't hold (`COMPANY_AGENT`,
+  `PARTNER_BUSINESS_MEMBER`, `BROKER` can view but not export) — checked
+  separately, both in the UI and again in `/api/reports/export`, which
+  streams the same aggregates back as one small multi-section CSV.
+- **Audit Log** (`/admin/audit`) — a browsable `automation_events` feed,
+  gated by `audit.view` (already seeded to roles since Phase 1, never
+  exposed in any UI until now), with a resource-type filter and links back
+  to the underlying listing/user where one exists.
+- **Automation Center** (`/admin/automation`) — job-queue counts by
+  status, a dead-letter queue (any job type/platform, not
+  integration-specific), and a recent `integration_logs` feed. **The one
+  actual UI consolidation this phase makes**: Phase 7's Facebook-specific
+  "failed posts" list and its `retrySyncJobAction` moved here entirely —
+  `retry_sync_job()` (built generic in Phase 7 specifically because
+  `integrations.retry`'s own description was never Facebook-specific) now
+  has the one general home its own design already implied, instead of a
+  second, narrower copy of the same retry button living on the org
+  settings page. The Google Sheets card's "Sync all now" stays where it
+  is — that's a deliberate bulk resync action, not error recovery, and is
+  a genuinely different feature from retrying a single dead-lettered job.
+- Nothing here changes what counts as a "meaningful" automation event or
+  sync job — this phase is purely a new way to look at data the last four
+  phases already produced correctly.
+
 ## Status: Phase 8 — Verification Automation (complete)
 
 Phase 5's stale-listing reminder was deliberately scoped as a precursor —
@@ -635,10 +683,15 @@ src/
                            integration sections
       admin/approvals/          pending-user review
       admin/listing-approvals/  pending-listing review queue
+      admin/audit/              automation_events feed, gated by audit.view (Phase 9)
+      admin/automation/         job-queue health, dead-letter queue + generic retry,
+                                 integration_logs feed (Phase 9)
       listings/           card-list w/ status tabs + quick actions (incl. Phase 8's
                            "Confirm Available"), new (manual form / paste-parser),
                            [id]/{overview,images,contacts,history}
       inquiries/, viewings/  internal management for what the public forms create
+      reports/            operational aggregates, RLS-scoped, gated by reports.view_*
+                           (Phase 9)
       notifications/      bell dropdown target + mark-read (Phase 5)
     (public)/         genuinely public, no auth — proxy.ts defaults here (see note above)
       page.tsx            marketplace homepage (was the old `/` dashboard-redirect)
@@ -649,6 +702,8 @@ src/
     api/cron/process-jobs/  the automation worker (Phase 5) — secret-protected Route Handler,
                              now also handling SHEETS_UPSERT_ROW (Phase 6) and
                              FACEBOOK_UPSERT_POST (Phase 7) jobs
+    api/reports/export/     CSV export, gated by reports.export separately from
+                             reports.view_* (Phase 9)
     auth/callback/    email-confirmation redirect handler
     pending-approval/ shown to logged-in users awaiting approval
   components/
@@ -663,6 +718,7 @@ src/
                        paste-parser, get-listing helper
     google/           Sheets API client (service account JWT), zod schemas (Phase 6)
     facebook/         Graph API client (page access token, plain fetch), zod schemas (Phase 7)
+    reports/          RLS-scoped aggregate queries + CSV builder (Phase 9)
     public/           search filter parsing, public listing queries (with the
                        is_publicly_visible re-check described above), inquiry/viewing
                        zod schemas
@@ -717,27 +773,39 @@ scripts/
   automation_events/sync_jobs you'd expect from their existing scenarios —
   real application flows exercising the automation layer, not just a
   synthetic test written to match the implementation.
+- Phase 9 adds no migration and no new RLS, so the same 27-migration,
+  seven-smoke-test rebuild above was re-run unchanged after this phase's
+  code landed, confirming no regression — the correct verification for a
+  phase that is entirely new queries over existing, already-tested schema.
 - `npm run typecheck` and `npm run lint` both pass with zero errors/warnings.
 - `npm run build` (production build, which type-checks and compiles every
   route including dynamic `[id]`/`[slug]` segments regardless of runtime
-  redirects) passes cleanly after every phase — 31 routes as of this one
-  (Phases 7 and 8 both added UI to existing pages, not new routes).
+  redirects) passes cleanly after every phase — 35 routes as of this one
+  (`/reports`, `/admin/audit`, `/admin/automation`, `/api/reports/export`
+  are new; Phases 7 and 8 both added UI to existing pages rather than new
+  routes).
 - Every protected route (`(dashboard)`, `/admin/*`, `/inquiries`,
-  `/viewings`, `/notifications`, `/pending-approval`, including
-  `/organizations/[id]` and `/listings/[id]`, which now also carry this
-  phase's and Phase 7's new UI) correctly 307-redirects unauthenticated
-  requests to
-  `/login?next=...`; every public route (`/`, `/properties`, `/for-rent`,
-  `/for-sale`, `/about`, `/contact`) does not redirect (verified against a
-  running dev server). This only proves the redirect layer, not that a
-  page renders correctly once past it — that's what the production build
-  check covers instead.
+  `/viewings`, `/notifications`, `/pending-approval`, `/reports`, and
+  `/organizations/[id]`/`/listings/[id]`, which carry earlier phases' UI)
+  correctly 307-redirects unauthenticated requests to `/login?next=...`;
+  every public route (`/`, `/properties`, `/for-rent`, `/for-sale`,
+  `/about`, `/contact`) does not redirect (verified against a running dev
+  server). This only proves the redirect layer, not that a page renders
+  correctly once past it — that's what the production build check covers
+  instead.
 - `/properties/does-not-exist` correctly 404s rather than crashing.
 - `/api/cron/process-jobs` correctly 401s with no `Authorization` header and
   with a wrong secret, and — with the correct secret — actually attempts its
   real logic (fails only on the expected `ECONNREFUSED` to the placeholder
   Supabase URL, the same known limitation as every other data-dependent
-  route in this sandbox, not a crash).
+  route in this sandbox, not a crash). `/api/reports/export` hits the same
+  known limitation one step earlier — its own permission check
+  (`getMyPermissions()`) already requires a Supabase round-trip, so an
+  unauthenticated request 500s on the placeholder URL's `ECONNREFUSED`
+  rather than cleanly 403ing the way `/api/cron/process-jobs` can (that
+  route's secret check is a pure string comparison with no network
+  involved) — a sandbox artifact of there being no live backend to
+  authenticate against, not a missing permission check.
 
 What is **not** verified (requires a real Supabase project and, for these
 phases specifically, a real Google service account + spreadsheet and a real

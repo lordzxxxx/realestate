@@ -96,18 +96,3 @@ export async function testFacebookConnectionAction(organizationId: string): Prom
   revalidatePath(`/organizations/${organizationId}`);
   return result.ok ? {} : { error: result.error };
 }
-
-/** Manually retry one dead-lettered sync job (section 32/77) — the only
- * "re-run" affordance this phase offers, deliberately scoped to a single
- * job rather than a bulk "post everything again" (see README: a duplicate
- * Facebook post is a lot more visible/costly than a duplicate spreadsheet
- * row). Permission and job-status checks both happen inside
- * retry_sync_job() itself. */
-export async function retrySyncJobAction(organizationId: string, jobId: string): Promise<ActionResult> {
-  const supabase = await createClient();
-  const { error } = await supabase.rpc('retry_sync_job', { p_job_id: jobId });
-  if (error) return { error: error.message };
-
-  revalidatePath(`/organizations/${organizationId}`);
-  return {};
-}

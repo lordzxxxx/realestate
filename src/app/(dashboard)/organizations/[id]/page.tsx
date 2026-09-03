@@ -6,7 +6,7 @@ import { OrganizationForm } from '../organization-form';
 import { OrganizationSettingsForm } from './organization-settings-form';
 import { OrganizationStatusControl } from './organization-status-control';
 import { GoogleSheetsConnectionCard } from './google-sheets-connection-card';
-import { FacebookConnectionCard, type FailedFacebookJob } from './facebook-connection-card';
+import { FacebookConnectionCard } from './facebook-connection-card';
 
 export default async function OrganizationDetailPage(props: PageProps<'/organizations/[id]'>) {
   const { id } = await props.params;
@@ -44,29 +44,6 @@ export default async function OrganizationDetailPage(props: PageProps<'/organiza
   ]);
 
   if (!organization) notFound();
-
-  let failedFacebookJobs: FailedFacebookJob[] = [];
-  if (canManageFacebook) {
-    const { data: jobs } = await supabase
-      .from('sync_jobs')
-      .select('id, payload, last_error, created_at')
-      .eq('organization_id', id)
-      .eq('platform', 'FACEBOOK')
-      .eq('status', 'FAILED_REQUIRES_ATTENTION')
-      .order('created_at', { ascending: false })
-      .limit(20);
-
-    failedFacebookJobs = (jobs ?? []).map((job) => {
-      const payload = job.payload as { property_name?: string; listing_number?: string };
-      return {
-        id: job.id,
-        propertyName: payload.property_name ?? 'Unknown listing',
-        listingNumber: payload.listing_number ?? '—',
-        lastError: job.last_error,
-        createdAt: job.created_at,
-      };
-    });
-  }
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
@@ -171,7 +148,6 @@ export default async function OrganizationDetailPage(props: PageProps<'/organiza
               lastSyncedAt={facebookConnection.last_synced_at}
               lastError={facebookConnection.last_error}
               orgSyncEnabled={settings?.auto_publish_facebook ?? true}
-              failedJobs={failedFacebookJobs}
             />
           ) : (
             <dl className="space-y-2 text-sm">

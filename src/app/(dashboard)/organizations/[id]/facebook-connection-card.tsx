@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useTransition } from 'react';
+import Link from 'next/link';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { facebookPageConnectionSchema, type FacebookPageConnectionInput } from '@/lib/facebook/schemas';
-import { saveFacebookSettingsAction, testFacebookConnectionAction, retrySyncJobAction } from './facebook-actions';
+import { saveFacebookSettingsAction, testFacebookConnectionAction } from './facebook-actions';
 import { Button } from '@/components/ui/button';
 import { Input, Label, FieldError } from '@/components/ui/input';
 
@@ -22,14 +23,6 @@ const STATUS_LABELS: Record<ConnectionStatus, string> = {
   ERROR: 'Error',
 };
 
-export interface FailedFacebookJob {
-  id: string;
-  propertyName: string;
-  listingNumber: string;
-  lastError: string | null;
-  createdAt: string;
-}
-
 export function FacebookConnectionCard({
   organizationId,
   pageId,
@@ -39,7 +32,6 @@ export function FacebookConnectionCard({
   lastSyncedAt,
   lastError,
   orgSyncEnabled,
-  failedJobs,
 }: {
   organizationId: string;
   pageId: string | null;
@@ -49,16 +41,12 @@ export function FacebookConnectionCard({
   lastSyncedAt: string | null;
   lastError: string | null;
   orgSyncEnabled: boolean;
-  failedJobs: FailedFacebookJob[];
 }) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
   const [testOk, setTestOk] = useState(false);
   const [isTesting, startTest] = useTransition();
-  const [retryingId, setRetryingId] = useState<string | null>(null);
-  const [retryMessage, setRetryMessage] = useState<string | null>(null);
-  const [isRetrying, startRetry] = useTransition();
 
   const {
     register,
@@ -92,16 +80,6 @@ export function FacebookConnectionCard({
     });
   };
 
-  const onRetry = (jobId: string) => {
-    setRetryingId(jobId);
-    setRetryMessage(null);
-    startRetry(async () => {
-      const result = await retrySyncJobAction(organizationId, jobId);
-      setRetryMessage(result?.error ? `Error: ${result.error}` : 'Re-queued — it will retry on the next worker run.');
-      setRetryingId(null);
-    });
-  };
-
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
@@ -115,7 +93,12 @@ export function FacebookConnectionCard({
       </div>
 
       {status === 'ERROR' && lastError && (
-        <p className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-700">{lastError}</p>
+        <p className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+          {lastError}{' '}
+          <Link href="/admin/automation" className="underline">
+            View in Automation Center →
+          </Link>
+        </p>
       )}
 
       {!orgSyncEnabled && (
@@ -162,34 +145,13 @@ export function FacebookConnectionCard({
         )}
       </form>
 
-      {failedJobs.length > 0 && (
-        <div className="space-y-2 border-t border-slate-200 pt-3">
-          <h3 className="text-xs font-semibold text-slate-700">Failed posts needing attention</h3>
-          <ul className="space-y-2">
-            {failedJobs.map((job) => (
-              <li key={job.id} className="flex items-start justify-between gap-3 rounded-md border border-slate-200 p-2 text-xs">
-                <div>
-                  <p className="font-medium text-slate-900">
-                    {job.propertyName} ({job.listingNumber})
-                  </p>
-                  {job.lastError && <p className="text-red-600">{job.lastError}</p>}
-                  <p className="text-slate-400">{new Date(job.createdAt).toLocaleString()}</p>
-                </div>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={isRetrying && retryingId === job.id}
-                  onClick={() => onRetry(job.id)}
-                >
-                  {isRetrying && retryingId === job.id ? 'Retrying…' : 'Retry'}
-                </Button>
-              </li>
-            ))}
-          </ul>
-          {retryMessage && <p className="text-sm text-slate-600">{retryMessage}</p>}
-        </div>
-      )}
+      <p className="text-xs text-slate-400">
+        Failed posts and retries now live in the{' '}
+        <Link href="/admin/automation" className="underline hover:text-slate-600">
+          Automation Center
+        </Link>
+        .
+      </p>
     </div>
   );
 }

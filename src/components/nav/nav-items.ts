@@ -1,5 +1,16 @@
 import type { LucideIcon } from 'lucide-react';
-import { LayoutDashboard, Building2, UserCheck, Home, ClipboardCheck, MessageSquare, CalendarClock } from 'lucide-react';
+import {
+  LayoutDashboard,
+  Building2,
+  UserCheck,
+  Home,
+  ClipboardCheck,
+  MessageSquare,
+  CalendarClock,
+  BarChart3,
+  ScrollText,
+  Workflow,
+} from 'lucide-react';
 
 export interface NavItem {
   label: string;
@@ -30,6 +41,14 @@ export const NAV_ITEMS: NavItem[] = [
     permissions: ['inquiry.view_own', 'inquiry.view_organization', 'inquiry.view_all'],
   },
   { label: 'Viewings', href: '/viewings', icon: CalendarClock, permissions: ['viewing.view', 'viewing.manage'] },
+  {
+    label: 'Reports',
+    href: '/reports',
+    icon: BarChart3,
+    permissions: ['reports.view_own', 'reports.view_organization', 'reports.view_all'],
+  },
   { label: 'Organizations', href: '/organizations', icon: Building2, permissions: ['organization.view'] },
   { label: 'User Approvals', href: '/admin/approvals', icon: UserCheck, permissions: ['user.approve'] },
+  { label: 'Audit Log', href: '/admin/audit', icon: ScrollText, permissions: ['audit.view'] },
+  { label: 'Automation Center', href: '/admin/automation', icon: Workflow, permissions: ['integrations.view'] },
 ];

@@ -119,7 +119,10 @@ export default async function DashboardPage() {
       </div>
 
       <p className="text-xs text-slate-400">
-        Inquiries, viewings, and integration health will appear here once those phases are built.
+        See <Link href="/reports" className="underline hover:text-slate-600">Reports</Link> for inquiries/viewings
+        breakdowns and verification compliance, or the{' '}
+        <Link href="/admin/automation" className="underline hover:text-slate-600">Automation Center</Link> for
+        integration health.
       </p>
     </div>
   );
