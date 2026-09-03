@@ -118,6 +118,17 @@ export async function approveAndPublishAction(listingId: string, note?: string):
   return {};
 }
 
+/** Phase 8's "Confirm still available" quick action — resets the
+ * verification reminder clock without touching status. */
+export async function verifyListingAction(listingId: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.rpc('verify_listing', { p_listing_id: listingId });
+  if (error) return { error: error.message };
+  revalidatePath(`/listings/${listingId}`);
+  revalidatePath('/listings');
+  return {};
+}
+
 export async function assignAgentAction(listingId: string, agentId: string | null): Promise<ActionResult> {
   const supabase = await createClient();
   const { error } = await supabase.rpc('assign_listing_agent', {

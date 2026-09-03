@@ -10,6 +10,44 @@ Full requirements: see the project brief this was built from (not included
 in this repo). Build proceeds phase-by-phase; each phase is fully working
 before the next starts — no placeholder CRUD, no fake "synced" statuses.
 
+## Status: Phase 8 — Verification Automation (complete)
+
+Phase 5's stale-listing reminder was deliberately scoped as a precursor —
+"a lightweight ... precursor to Phase 8's fuller verification workflow,
+not a reimplementation of it." This phase is that fuller workflow: a
+two-tier escalation, plus the actual mechanism an agent uses to respond to
+it (which didn't exist until now — the only way to reset
+`last_verified_at` before this phase was to toggle a listing's status away
+and back).
+
+- **`verify_listing()`** (`0027`) — the "Confirm still available" action.
+  `last_verified_at` has been column-locked from direct client `UPDATE`
+  since `0013` (same as `status`/other timestamps), so this follows the
+  exact same pattern as `assign_listing_agent()` (`0014`): permission-
+  checked (`listing_actor_has()`, the same creator/assigned-agent-or-
+  broader-permission check used throughout the listings domain), touches
+  only the one column it owns. Deliberately does **not** bump `version` —
+  `listing_change_is_meaningful()` doesn't list `last_verified_at`, so
+  there's no new `listing_revisions` snapshot and no fresh Sheets/Facebook
+  sync job for what is "confirmed, nothing changed" rather than a content
+  edit. Verified in the smoke test: an unrelated outsider is blocked, the
+  actual owner/assigned agent succeeds, and status/version/revision-count
+  are all provably unchanged by it.
+- **Two-tier escalation**, extending `enqueueStaleListingReminders()` in
+  the cron worker: day 7 still reminds the assigned agent (unchanged from
+  Phase 5); day 14 additionally notifies every `listing.approve` holder in
+  the org (`notify_users_with_permission()`, already built in Phase 5,
+  simply not yet used for this) that the listing needs attention. **No
+  automatic status change at either tier** — per this build's running
+  rule that status transitions stay a human decision (section 14's "do not
+  permanently delete... automatically" extends in spirit to "do not
+  silently unpublish either"), this only ever adds visibility, never takes
+  the decision out of a human's hands.
+- **UI**: a "Confirm Available" quick action on the listings list (next to
+  Reserve/Mark Rented/Mark Sold, appearing only when a listing is
+  `AVAILABLE` and actually stale) and a matching "Confirm Still Available"
+  on the listing detail page's status panel.
+
 ## Status: Phase 7 — Facebook Page Integration (complete)
 
 Unlike Phase 6's shared Google service account, a Facebook Page can only be
@@ -503,7 +541,7 @@ locally with the Supabase CLI, if you have Docker available). You'll need:
 
 In the Supabase SQL Editor (or via the Supabase CLI's `supabase db push`
 against a linked project), run every file in `supabase/migrations/` **in
-order** (`0001` through `0026`). Do not run anything under `supabase/seed/`
+order** (`0001` through `0027`). Do not run anything under `supabase/seed/`
 against a real project — those are local-Postgres-only test fixtures.
 
 Migration `0016` creates the `listing-images` Storage bucket and its
@@ -597,8 +635,9 @@ src/
                            integration sections
       admin/approvals/          pending-user review
       admin/listing-approvals/  pending-listing review queue
-      listings/           card-list w/ status tabs + quick actions, new (manual form /
-                           paste-parser), [id]/{overview,images,contacts,history}
+      listings/           card-list w/ status tabs + quick actions (incl. Phase 8's
+                           "Confirm Available"), new (manual form / paste-parser),
+                           [id]/{overview,images,contacts,history}
       inquiries/, viewings/  internal management for what the public forms create
       notifications/      bell dropdown target + mark-read (Phase 5)
     (public)/         genuinely public, no auth — proxy.ts defaults here (see note above)
@@ -630,7 +669,7 @@ src/
   types/database.ts   hand-written Supabase Database type (regenerate once
                        a real project exists: see comment at top of file)
 supabase/
-  migrations/         0001–0026, run in order against a real Supabase project
+  migrations/         0001–0027, run in order against a real Supabase project
   seed/               LOCAL POSTGRES TEST FIXTURES ONLY — do not run against Supabase
 scripts/
   bootstrap-admin.ts  one-time first-admin promotion (service role)
@@ -638,9 +677,9 @@ scripts/
 
 ## Verification performed
 
-- All 26 migrations (`0016`'s Storage-only pieces aside — see note above)
+- All 27 migrations (`0016`'s Storage-only pieces aside — see note above)
   applied cleanly against local PostgreSQL 16, in order, with no errors.
-- Six smoke tests pass end-to-end, run in order (each depends on data from
+- Seven smoke tests pass end-to-end, run in order (each depends on data from
   the previous ones): `999_smoke_test.sql` (auth/RBAC/RLS),
   `998_listing_smoke_test.sql` (listings domain),
   `997_inquiries_smoke_test.sql` (public insert + auto-assignment +
@@ -665,7 +704,13 @@ scripts/
   in itself — its permission check is verified using a job id captured via
   a session GUC rather than a fresh RLS-visible `SELECT`, so a deleted
   permission check would actually fail the test instead of an RLS-hidden
-  row silently producing the same "blocked" outcome for the wrong reason).
+  row silently producing the same "blocked" outcome for the wrong reason),
+  and `993_listing_verification_smoke_test.sql` (Phase 8: an unrelated
+  outsider is blocked from calling `verify_listing()`; the listing's own
+  creator/assigned agent succeeds; `status`, `version`, and the
+  `listing_revisions` count are all provably unchanged by a verification —
+  confirming it really is a no-op on everything except `last_verified_at`,
+  not just documented as one).
 - Beyond the dedicated smoke tests, Phase 5's, Phase 6's, and Phase 7's
   pipelines were all also verified *organically*: running the pre-existing
   suites with the new triggers active produced exactly the
@@ -676,11 +721,12 @@ scripts/
 - `npm run build` (production build, which type-checks and compiles every
   route including dynamic `[id]`/`[slug]` segments regardless of runtime
   redirects) passes cleanly after every phase — 31 routes as of this one
-  (Phase 7 added a section to an existing page, not a new route).
+  (Phases 7 and 8 both added UI to existing pages, not new routes).
 - Every protected route (`(dashboard)`, `/admin/*`, `/inquiries`,
   `/viewings`, `/notifications`, `/pending-approval`, including
-  `/organizations/[id]`, which now also carries the Facebook settings
-  section) correctly 307-redirects unauthenticated requests to
+  `/organizations/[id]` and `/listings/[id]`, which now also carry this
+  phase's and Phase 7's new UI) correctly 307-redirects unauthenticated
+  requests to
   `/login?next=...`; every public route (`/`, `/properties`, `/for-rent`,
   `/for-sale`, `/about`, `/contact`) does not redirect (verified against a
   running dev server). This only proves the redirect layer, not that a

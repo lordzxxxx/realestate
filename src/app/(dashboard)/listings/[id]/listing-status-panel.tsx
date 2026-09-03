@@ -1,9 +1,16 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { submitListingAction, setListingStatusAction, approveAndPublishAction } from '../actions';
+import { submitListingAction, setListingStatusAction, approveAndPublishAction, verifyListingAction } from '../actions';
 import { Button } from '@/components/ui/button';
 import type { Listing } from '@/lib/listings/get-listing';
+
+const STALE_VERIFICATION_DAYS = 7;
+
+function isStale(lastVerifiedAt: string | null): boolean {
+  if (!lastVerifiedAt) return true;
+  return Date.now() - new Date(lastVerifiedAt).getTime() > STALE_VERIFICATION_DAYS * 24 * 60 * 60 * 1000;
+}
 
 export function ListingStatusPanel({ listing }: { listing: Listing }) {
   const [isPending, startTransition] = useTransition();
@@ -104,6 +111,11 @@ export function ListingStatusPanel({ listing }: { listing: Listing }) {
             >
               Temporarily Unavailable
             </Button>
+            {isStale(listing.last_verified_at) && (
+              <Button size="sm" variant="secondary" disabled={isPending} onClick={() => run(() => verifyListingAction(listing.id))}>
+                Confirm Still Available
+              </Button>
+            )}
           </>
         )}
 

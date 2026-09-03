@@ -17,47 +17,85 @@ function isAuthorized(request: Request): boolean {
 }
 
 const STALE_AFTER_DAYS = 7;
+// Phase 8 (section 32/37/56): a listing still unverified a full week after
+// the agent's own reminder started escalates to management — never an
+// automatic status change (that stays a human decision, same as every
+// other status transition in this build), just visibility that something
+// needs a human to look at it.
+const ESCALATION_AFTER_DAYS = 14;
 const JOB_BATCH_SIZE = 20;
 
 async function enqueueStaleListingReminders(supabase: ReturnType<typeof createServiceRoleClient>) {
-  const cutoff = new Date(Date.now() - STALE_AFTER_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const staleCutoff = new Date(Date.now() - STALE_AFTER_DAYS * 24 * 60 * 60 * 1000);
+  const escalationCutoff = new Date(Date.now() - ESCALATION_AFTER_DAYS * 24 * 60 * 60 * 1000);
   const today = new Date().toISOString().slice(0, 10); // one reminder per listing per day, not per 5-min tick
 
   const { data: staleListings } = await supabase
     .from('listings')
-    .select('id, organization_id, property_name, listing_number, assigned_agent_id, created_by')
+    .select('id, organization_id, property_name, listing_number, assigned_agent_id, created_by, last_verified_at')
     .eq('status', 'AVAILABLE')
-    .or(`last_verified_at.is.null,last_verified_at.lt.${cutoff}`);
+    .or(`last_verified_at.is.null,last_verified_at.lt.${staleCutoff.toISOString()}`);
 
-  let enqueued = 0;
+  let remindersEnqueued = 0;
+  let escalationsEnqueued = 0;
+
   for (const listing of staleListings ?? []) {
     const recipient = listing.assigned_agent_id ?? listing.created_by;
-    if (!recipient) continue;
+    if (recipient) {
+      const { data: eventId } = await supabase.rpc('create_automation_event', {
+        p_organization_id: listing.organization_id,
+        p_event_type: 'LISTING_VERIFICATION_DUE',
+        p_resource_type: 'listing',
+        p_resource_id: listing.id,
+        p_actor_id: null,
+        p_payload: { property_name: listing.property_name },
+      });
 
-    const { data: eventId } = await supabase.rpc('create_automation_event', {
-      p_organization_id: listing.organization_id,
-      p_event_type: 'LISTING_VERIFICATION_DUE',
-      p_resource_type: 'listing',
-      p_resource_id: listing.id,
-      p_actor_id: null,
-      p_payload: { property_name: listing.property_name },
-    });
+      const { data: jobId } = await supabase.rpc('enqueue_notification_job', {
+        p_user_id: recipient,
+        p_organization_id: listing.organization_id,
+        p_event_id: eventId ?? null,
+        p_type: 'LISTING_VERIFICATION_DUE',
+        p_title: 'Is this still available?',
+        p_body: `${listing.property_name} (${listing.listing_number}) hasn't been verified in over ${STALE_AFTER_DAYS} days.`,
+        p_link: `/listings/${listing.id}`,
+        p_idempotency_suffix: `stale_reminder:${listing.id}:${today}`,
+      });
 
-    const { data: jobId } = await supabase.rpc('enqueue_notification_job', {
-      p_user_id: recipient,
-      p_organization_id: listing.organization_id,
-      p_event_id: eventId ?? null,
-      p_type: 'LISTING_VERIFICATION_DUE',
-      p_title: 'Is this still available?',
-      p_body: `${listing.property_name} (${listing.listing_number}) hasn't been verified in over ${STALE_AFTER_DAYS} days.`,
-      p_link: `/listings/${listing.id}`,
-      p_idempotency_suffix: `stale_reminder:${listing.id}:${today}`,
-    });
+      if (jobId) remindersEnqueued += 1;
+    }
 
-    if (jobId) enqueued += 1;
+    const isOverdue = listing.last_verified_at == null || new Date(listing.last_verified_at) < escalationCutoff;
+    if (isOverdue) {
+      const { data: escalationEventId } = await supabase.rpc('create_automation_event', {
+        p_organization_id: listing.organization_id,
+        p_event_type: 'LISTING_VERIFICATION_OVERDUE',
+        p_resource_type: 'listing',
+        p_resource_id: listing.id,
+        p_actor_id: null,
+        p_payload: { property_name: listing.property_name },
+      });
+
+      // Fans out to every listing.approve holder in the org (global or
+      // org-scoped) — unlike the agent reminder above, there's no single
+      // "recipient" for an escalation, so this can't return a job id to
+      // count precisely the way enqueue_notification_job does.
+      await supabase.rpc('notify_users_with_permission', {
+        p_permission: 'listing.approve',
+        p_organization_id: listing.organization_id,
+        p_event_id: escalationEventId ?? null,
+        p_type: 'LISTING_VERIFICATION_OVERDUE',
+        p_title: 'Listing verification overdue',
+        p_body: `${listing.property_name} (${listing.listing_number}) hasn't been verified in over ${ESCALATION_AFTER_DAYS} days.`,
+        p_link: `/listings/${listing.id}`,
+        p_idempotency_suffix: `overdue_escalation:${listing.id}:${today}`,
+      });
+
+      escalationsEnqueued += 1;
+    }
   }
 
-  return enqueued;
+  return { remindersEnqueued, escalationsEnqueued };
 }
 
 async function processSendNotificationJob(
@@ -283,7 +321,7 @@ export async function GET(request: Request) {
   const supabase = createServiceRoleClient();
 
   const { data: reclaimedCount } = await supabase.rpc('reclaim_stuck_sync_jobs', { p_stuck_after: '10 minutes' });
-  const staleRemindersEnqueued = await enqueueStaleListingReminders(supabase);
+  const { remindersEnqueued, escalationsEnqueued } = await enqueueStaleListingReminders(supabase);
 
   const { data: jobs, error: claimError } = await supabase.rpc('claim_next_sync_jobs', { p_limit: JOB_BATCH_SIZE });
   if (claimError) {
@@ -302,9 +340,9 @@ export async function GET(request: Request) {
       } else if (job.job_type === 'FACEBOOK_UPSERT_POST') {
         await processFacebookUpsertPostJob(supabase, job as { id: string; organization_id: string | null; payload: Record<string, unknown> });
       } else {
-        // No handler yet for this job_type (e.g. a future Phase 8 job type)
-        // — fail it through the normal retry/dead-letter path rather than
-        // silently dropping it or crashing the batch.
+        // No handler yet for this job_type (e.g. a future Phase 9+ job
+        // type) — fail it through the normal retry/dead-letter path rather
+        // than silently dropping it or crashing the batch.
         throw new Error(`No handler for job_type "${job.job_type}"`);
       }
 
@@ -341,7 +379,8 @@ export async function GET(request: Request) {
 
   return NextResponse.json({
     reclaimed: reclaimedCount ?? 0,
-    staleRemindersEnqueued,
+    remindersEnqueued,
+    escalationsEnqueued,
     claimed: jobs?.length ?? 0,
     succeeded,
     failed,

@@ -113,7 +113,12 @@ export default async function ListingsPage(props: PageProps<'/listings'>) {
                 {listing.listing_type === 'RENT' && listing.monthly_rent ? '/mo' : ''}
               </p>
             </div>
-            <QuickStatusActions listingId={listing.id} status={listing.status} listingType={listing.listing_type} />
+            <QuickStatusActions
+              listingId={listing.id}
+              status={listing.status}
+              listingType={listing.listing_type}
+              lastVerifiedAt={listing.last_verified_at}
+            />
           </div>
         ))}
         {listings?.length === 0 && (

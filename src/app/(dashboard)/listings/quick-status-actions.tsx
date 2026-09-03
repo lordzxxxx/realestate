@@ -1,9 +1,16 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { submitListingAction, setListingStatusAction } from './actions';
+import { submitListingAction, setListingStatusAction, verifyListingAction } from './actions';
 import { Button } from '@/components/ui/button';
 import type { ListingStatus, ListingType } from '@/types/database';
+
+const STALE_VERIFICATION_DAYS = 7;
+
+function isStale(lastVerifiedAt: string | null): boolean {
+  if (!lastVerifiedAt) return true;
+  return Date.now() - new Date(lastVerifiedAt).getTime() > STALE_VERIFICATION_DAYS * 24 * 60 * 60 * 1000;
+}
 
 /**
  * Compact 1-2 button quick actions for the listings list (section 40: "an
@@ -15,10 +22,12 @@ export function QuickStatusActions({
   listingId,
   status,
   listingType,
+  lastVerifiedAt,
 }: {
   listingId: string;
   status: ListingStatus;
   listingType: ListingType;
+  lastVerifiedAt: string | null;
 }) {
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -45,6 +54,13 @@ export function QuickStatusActions({
         variant: 'secondary',
       }
     );
+    if (isStale(lastVerifiedAt)) {
+      buttons.push({
+        label: 'Confirm Available',
+        onClick: () => run(() => verifyListingAction(listingId)),
+        variant: 'secondary',
+      });
+    }
   }
   if (status === 'RESERVED') {
     buttons.push(

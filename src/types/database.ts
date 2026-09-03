@@ -770,6 +770,12 @@ export interface Database {
         Args: { p_listing_id: string; p_agent_id: string | null };
         Returns: Database['public']['Tables']['listings']['Row'];
       };
+      // Phase 8: permission-checked (listing_actor_has), touches only
+      // last_verified_at — the "Confirm still available" action.
+      verify_listing: {
+        Args: { p_listing_id: string };
+        Returns: Database['public']['Tables']['listings']['Row'];
+      };
       // The following are revoked from authenticated/anon (0020, 0022) —
       // callable only by the service-role worker, never via a user session's
       // supabase.rpc(). Typed here for the worker's own use.
