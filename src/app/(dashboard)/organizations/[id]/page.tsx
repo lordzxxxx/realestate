@@ -1,18 +1,32 @@
 import { notFound } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { hasPermission } from '@/lib/auth/permissions';
+import { getServiceAccountEmail } from '@/lib/google/sheets';
 import { OrganizationForm } from '../organization-form';
 import { OrganizationSettingsForm } from './organization-settings-form';
 import { OrganizationStatusControl } from './organization-status-control';
+import { GoogleSheetsConnectionCard } from './google-sheets-connection-card';
 
 export default async function OrganizationDetailPage(props: PageProps<'/organizations/[id]'>) {
   const { id } = await props.params;
   const supabase = await createClient();
 
-  const [{ data: organization }, { data: settings }, canEdit] = await Promise.all([
+  const [
+    { data: organization },
+    { data: settings },
+    { data: sheetsConnection },
+    canEdit,
+    canViewIntegrations,
+    canManageIntegrations,
+  ] = await Promise.all([
     supabase.from('organizations').select('*').eq('id', id).maybeSingle(),
     supabase.from('organization_settings').select('*').eq('organization_id', id).maybeSingle(),
+    supabase.from('google_sheet_connections').select('*').eq('organization_id', id).maybeSingle(),
     hasPermission('organization.edit', id),
+    hasPermission('integrations.view', id),
+    Promise.all([hasPermission('integrations.manage', id), hasPermission('integrations.google', id)]).then(
+      ([manage, google]) => manage || google
+    ),
   ]);
 
   if (!organization) notFound();
@@ -70,6 +84,40 @@ export default async function OrganizationDetailPage(props: PageProps<'/organiza
               auto_sync_google_sheets: settings.auto_sync_google_sheets,
             }}
           />
+        </section>
+      )}
+
+      {canViewIntegrations && sheetsConnection && (
+        <section className="rounded-lg border border-slate-200 bg-white p-6">
+          <h2 className="mb-4 text-sm font-semibold text-slate-900">Google Sheets integration</h2>
+          {canManageIntegrations ? (
+            <GoogleSheetsConnectionCard
+              organizationId={organization.id}
+              serviceAccountEmail={getServiceAccountEmail()}
+              defaultValues={{
+                spreadsheet_id: sheetsConnection.spreadsheet_id ?? '',
+                property_sheet_name: sheetsConnection.property_sheet_name,
+              }}
+              status={sheetsConnection.status}
+              lastCheckedAt={sheetsConnection.last_checked_at}
+              lastSyncedAt={sheetsConnection.last_synced_at}
+              lastError={sheetsConnection.last_error}
+              orgSyncEnabled={settings?.auto_sync_google_sheets ?? true}
+            />
+          ) : (
+            <dl className="space-y-2 text-sm">
+              <div className="flex justify-between">
+                <dt className="text-slate-500">Status</dt>
+                <dd className="text-slate-900">{sheetsConnection.status}</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-slate-500">Last synced</dt>
+                <dd className="text-slate-900">
+                  {sheetsConnection.last_synced_at ? new Date(sheetsConnection.last_synced_at).toLocaleString() : '—'}
+                </dd>
+              </div>
+            </dl>
+          )}
         </section>
       )}
     </div>

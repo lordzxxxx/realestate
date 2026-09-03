@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createServiceRoleClient } from '@/lib/supabase/server';
+import { upsertListingRow, type ListingRowData } from '@/lib/google/sheets';
 
 // Section 77: "Never expose the cron endpoint publicly without
 // authentication. Use secret verification." Vercel Cron sends
@@ -92,6 +93,103 @@ async function processSendNotificationJob(
   if (error) throw error;
 }
 
+interface SheetsUpsertRowPayload {
+  spreadsheet_id: string;
+  sheet_name: string;
+  listing_id: string;
+  listing_number: string;
+  status: string;
+  listing_type: string;
+  property_type: string;
+  property_name: string;
+  bedrooms: number | null;
+  bathrooms: number | null;
+  floor_area: number | null;
+  monthly_rent: number | null;
+  selling_price: number | null;
+  city: string | null;
+  province: string | null;
+  assigned_agent_name: string | null;
+  last_verified_at: string | null;
+  updated_at: string;
+  slug: string;
+}
+
+function listingUrlFor(slug: string): string {
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
+  return siteUrl ? `${siteUrl}/properties/${slug}` : `/properties/${slug}`;
+}
+
+async function processSheetsUpsertRowJob(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  job: { id: string; organization_id: string | null; payload: Record<string, unknown> }
+) {
+  const payload = job.payload as unknown as SheetsUpsertRowPayload;
+  if (!job.organization_id) throw new Error('SHEETS_UPSERT_ROW job is missing organization_id');
+
+  // Section 27: "Use Listing ID as the stable mapping key." This lookup is
+  // what turns a second sync of the same listing into an in-place update
+  // instead of a second appended row.
+  const { data: existingRecord } = await supabase
+    .from('sheet_sync_records')
+    .select('row_number')
+    .eq('organization_id', job.organization_id)
+    .eq('listing_id', payload.listing_id)
+    .maybeSingle();
+
+  const rowData: ListingRowData = {
+    listingId: payload.listing_id,
+    listingNumber: payload.listing_number,
+    status: payload.status,
+    listingType: payload.listing_type,
+    propertyType: payload.property_type,
+    propertyName: payload.property_name,
+    bedrooms: payload.bedrooms,
+    bathrooms: payload.bathrooms,
+    floorArea: payload.floor_area,
+    monthlyRent: payload.monthly_rent,
+    sellingPrice: payload.selling_price,
+    city: payload.city,
+    province: payload.province,
+    assignedAgentName: payload.assigned_agent_name,
+    lastVerifiedAt: payload.last_verified_at,
+    updatedAt: payload.updated_at,
+    listingUrl: listingUrlFor(payload.slug),
+  };
+
+  const { rowNumber } = await upsertListingRow(
+    payload.spreadsheet_id,
+    payload.sheet_name,
+    existingRecord?.row_number ?? null,
+    rowData
+  );
+
+  const { error: recordError } = await supabase.from('sheet_sync_records').upsert(
+    {
+      organization_id: job.organization_id,
+      listing_id: payload.listing_id,
+      row_number: rowNumber,
+      last_synced_at: new Date().toISOString(),
+    },
+    { onConflict: 'organization_id,listing_id' }
+  );
+  if (recordError) throw recordError;
+
+  // A prior job may have flagged the connection ERROR; a subsequent success
+  // (transient API blip, now resolved) should clear that back to CONNECTED
+  // rather than leaving a stale error banner in the settings UI.
+  const { error: connectionError } = await supabase
+    .from('google_sheet_connections')
+    .update({
+      status: 'CONNECTED',
+      last_synced_at: new Date().toISOString(),
+      last_checked_at: new Date().toISOString(),
+      last_error: null,
+    })
+    .eq('organization_id', job.organization_id);
+  if (connectionError) throw connectionError;
+}
+
 export async function GET(request: Request) {
   if (!isAuthorized(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -114,9 +212,11 @@ export async function GET(request: Request) {
     try {
       if (job.job_type === 'SEND_NOTIFICATION') {
         await processSendNotificationJob(supabase, job as { id: string; payload: Record<string, unknown> });
+      } else if (job.job_type === 'SHEETS_UPSERT_ROW') {
+        await processSheetsUpsertRowJob(supabase, job as { id: string; organization_id: string | null; payload: Record<string, unknown> });
       } else {
         // No handler yet for this job_type (e.g. a future FACEBOOK_CREATE_POST
-        // before Phase 6 lands) — fail it through the normal retry/dead-letter
+        // before Phase 7 lands) — fail it through the normal retry/dead-letter
         // path rather than silently dropping it or crashing the batch.
         throw new Error(`No handler for job_type "${job.job_type}"`);
       }
@@ -124,10 +224,23 @@ export async function GET(request: Request) {
       await supabase.rpc('complete_sync_job', { p_job_id: job.id, p_success: true });
       succeeded += 1;
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+
+      // Surface the failure on the connection immediately rather than
+      // waiting for full dead-letter (max_attempts) — the settings page
+      // should show "last error" as soon as a sync actually fails, not
+      // minutes later after 2-3 silent retries.
+      if (job.job_type === 'SHEETS_UPSERT_ROW' && job.organization_id) {
+        await supabase
+          .from('google_sheet_connections')
+          .update({ status: 'ERROR', last_checked_at: new Date().toISOString(), last_error: message })
+          .eq('organization_id', job.organization_id);
+      }
+
       await supabase.rpc('complete_sync_job', {
         p_job_id: job.id,
         p_success: false,
-        p_error: err instanceof Error ? err.message : String(err),
+        p_error: message,
       });
       failed += 1;
     }

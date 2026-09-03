@@ -617,6 +617,56 @@ export interface Database {
         // matches the column grant in migration 0019.
         Update: Partial<{ read_at: string | null }>;
       } & NoRelationships;
+      google_sheet_connections: {
+        Row: {
+          organization_id: string;
+          spreadsheet_id: string | null;
+          property_sheet_name: string;
+          status: 'DISCONNECTED' | 'CONNECTED' | 'ERROR';
+          last_checked_at: string | null;
+          last_synced_at: string | null;
+          last_error: string | null;
+          created_at: string;
+          updated_at: string;
+          updated_by: string | null;
+        };
+        Insert: never; // one row per org, auto-provisioned by trigger (0023)
+        // Deliberately two disjoint update shapes at the call site (see
+        // migration 0024): changing the target resets status, so
+        // "save settings" and "test connection" must be separate writes.
+        Update: Partial<{
+          spreadsheet_id: string | null;
+          property_sheet_name: string;
+          status: 'DISCONNECTED' | 'CONNECTED' | 'ERROR';
+          last_checked_at: string | null;
+          last_synced_at: string | null;
+          last_error: string | null;
+          updated_by: string | null;
+        }>;
+      } & NoRelationships;
+      sheet_sync_records: {
+        Row: {
+          id: string;
+          organization_id: string;
+          listing_id: string;
+          row_number: number;
+          last_synced_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        // Written by direct table access from the worker's service-role
+        // client (like `notifications`, unlike the RPC-only automation
+        // tables above) — RLS/grants (migration 0023) block authenticated/
+        // anon from ever exercising this shape themselves.
+        Insert: {
+          id?: string;
+          organization_id: string;
+          listing_id: string;
+          row_number: number;
+          last_synced_at?: string | null;
+        };
+        Update: Partial<{ row_number: number; last_synced_at: string | null }>;
+      } & NoRelationships;
     };
     Views: Record<string, never>;
     Functions: {
@@ -722,6 +772,13 @@ export interface Database {
       };
       reclaim_stuck_sync_jobs: {
         Args: { p_stuck_after?: string };
+        Returns: number;
+      };
+      // Permission-checked internally (migration 0024) — callable directly
+      // by an authenticated session with integrations.manage/google/retry,
+      // unlike the RPCs above.
+      reconcile_google_sheets: {
+        Args: { p_organization_id: string };
         Returns: number;
       };
     };

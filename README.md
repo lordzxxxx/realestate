@@ -10,6 +10,87 @@ Full requirements: see the project brief this was built from (not included
 in this repo). Build proceeds phase-by-phase; each phase is fully working
 before the next starts — no placeholder CRUD, no fake "synced" statuses.
 
+## Status: Phase 6 — Google Sheets Integration (complete)
+
+The `SHEETS_UPSERT_ROW`/`GOOGLE_SHEETS` job type Phase 5 deliberately left
+unmanufactured now has a real handler: a shared Google service account (one
+platform-level credential, not per-org OAuth) syncs each organization's
+listings to their own connected spreadsheet.
+
+- **Schema** (`0023`): `google_sheet_connections` (one row per org,
+  auto-provisioned by trigger — same pattern as `organization_settings` in
+  `0005` — so the settings page always has a row to read/update) and
+  `sheet_sync_records` (section 27's "use Listing ID as the stable mapping
+  key" — which spreadsheet row a listing already occupies, so a later sync
+  updates in place instead of appending a duplicate). Both staff-viewable
+  via `integrations.view`; connection settings writable via
+  `integrations.manage`/`integrations.google`; `sheet_sync_records` is
+  worker-only bookkeeping — no INSERT/UPDATE grant exists for
+  `authenticated`/`anon` at all.
+- **Dispatch trigger** (`0024`) fires on every listing insert/update,
+  gated by three independent checks that all have to pass: the listing's
+  own `google_sheets_enabled`/`auto_sync_enabled` toggles (columns that
+  have existed on `listings` since `0010`, unused until now),
+  `organization_settings.auto_sync_google_sheets` (**a real gap found and
+  fixed while building this**: that org-level kill switch has existed
+  since `0005` too, and nothing before this phase actually consulted it —
+  the trigger and `reconcile_google_sheets()` both check it now), and the
+  org's connection actually being `CONNECTED` with a `spreadsheet_id` set.
+  The job payload carries every field the worker needs (property name,
+  price, status, assigned agent's name, ...) pre-denormalized at enqueue
+  time, so the worker never needs a second round-trip back to `listings`.
+- **A trigger-ordering bug found by the smoke test, not by inspection**:
+  the natural first draft of "changing the spreadsheet target resets
+  `status` to `DISCONNECTED`" (a `BEFORE UPDATE` trigger) also clobbered a
+  legitimate `status = 'CONNECTED'` write sent in the *same* `UPDATE`
+  statement — the trigger can't distinguish "the client just explicitly
+  asked for CONNECTED" from "status merely carried over unchanged". Fixed
+  at the call-site convention, not by making the trigger smarter: "Save
+  settings" (`spreadsheet_id`/`property_sheet_name` only) and "Test
+  connection" (`status`/`last_checked_at`/`last_error` only) are always
+  two separate writes, documented with a comment on both server actions and
+  the smoke test that exercises it, so a future edit can't accidentally
+  recombine them.
+- **The real Sheets API client** (`src/lib/google/sheets.ts`) — service
+  account JWT auth via `googleapis`, column-order contract shared with the
+  worker, header-row management that never clobbers existing content,
+  `testSheetsConnection()` (verifies the named tab actually exists — a
+  spreadsheet ID typo or wrong tab name fails loudly instead of silently
+  writing to the wrong place), and `upsertListingRow()` (updates in place
+  by row number when `sheet_sync_records` already has one, otherwise
+  appends and parses the new row number back out of the API's response
+  range). Every export throws a clear, specific error when
+  `GOOGLE_SERVICE_ACCOUNT_KEY` isn't configured, rather than silently
+  no-op'ing.
+- **Worker handler** (`src/app/api/cron/process-jobs/route.ts`): looks up
+  the listing's existing row (if any) via `sheet_sync_records`, calls
+  `upsertListingRow()`, records the row number back, and clears/sets the
+  connection's `status`/`last_error` based on the outcome — a failure
+  surfaces on the settings page immediately (not just after the full
+  retry→dead-letter cycle finishes minutes later).
+- **Manual reconciliation**: `reconcile_google_sheets()` (permission-checked
+  internally, unlike Phase 5's revoked-from-authenticated helpers, since
+  it's meant to be called directly from the "Sync all now" button) force-
+  requeues every eligible listing in an org even when nothing changed —
+  keyed on a fresh run ID rather than `listing.version`, so it actually
+  requeues instead of no-op'ing against jobs the per-change trigger already
+  enqueued.
+- **Settings UI**: a new "Google Sheets integration" section on
+  `/organizations/[id]`, gated the same way as everything else on that page
+  (`integrations.view` to see it, `integrations.manage`/`integrations.google`
+  to edit) — service account email + share instructions, spreadsheet
+  ID/URL + tab name fields, Save/Test/Sync-all-now, status badge, and a
+  warning when the org-level auto-sync switch is off even though the
+  connection itself is verified.
+
+**Inert until real credentials exist** (same pattern as every external
+integration in this build): `GOOGLE_SERVICE_ACCOUNT_KEY` is unset in this
+sandbox, so `getServiceAccountEmail()` returns null (the settings page
+shows a setup instruction instead of crashing) and any real API call fails
+with a clear "GOOGLE_SERVICE_ACCOUNT_KEY is not set" error, caught and
+surfaced the same way a real Google API error would be — nothing pretends
+to succeed.
+
 ## Status: Phase 5 — Automation Engine (complete)
 
 The outbox pattern end to end: a DB transaction that changes something
@@ -351,6 +432,8 @@ NEXT_PUBLIC_SUPABASE_URL=https://<your-project>.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key>
 SUPABASE_SERVICE_ROLE_KEY=<service role key>   # server-only, never expose to the client
 CRON_SECRET=<random secret>                    # server-only; protects /api/cron/process-jobs (Phase 5)
+GOOGLE_SERVICE_ACCOUNT_KEY=<service account JSON, one line>  # server-only (Phase 6); see .env.local.example
+NEXT_PUBLIC_SITE_URL=https://<your-domain>     # used to build absolute listing URLs from background workers
 ```
 
 In your Supabase project's Auth settings, add
@@ -409,7 +492,7 @@ src/
     (auth)/           login, register, check-email + server actions
     (dashboard)/      protected app shell
       dashboard/          real operational stats (section 41)
-      organizations/      CRUD + settings
+      organizations/      CRUD + settings + Google Sheets integration section (Phase 6)
       admin/approvals/          pending-user review
       admin/listing-approvals/  pending-listing review queue
       listings/           card-list w/ status tabs + quick actions, new (manual form /
@@ -422,7 +505,8 @@ src/
                            Viewing forms + their server actions
       for-rent/, for-sale/  same search component as properties/, forced listing_type
       about/, contact/    minimal static pages
-    api/cron/process-jobs/  the automation worker (Phase 5) — secret-protected Route Handler
+    api/cron/process-jobs/  the automation worker (Phase 5) — secret-protected Route Handler,
+                             now also handling SHEETS_UPSERT_ROW jobs (Phase 6)
     auth/callback/    email-confirmation redirect handler
     pending-approval/ shown to logged-in users awaiting approval
   components/
@@ -435,13 +519,14 @@ src/
     organizations/    zod schemas
     listings/         zod schemas (client-facing + server-authoritative), constants,
                        paste-parser, get-listing helper
+    google/           Sheets API client (service account JWT), zod schemas (Phase 6)
     public/           search filter parsing, public listing queries (with the
                        is_publicly_visible re-check described above), inquiry/viewing
                        zod schemas
   types/database.ts   hand-written Supabase Database type (regenerate once
                        a real project exists: see comment at top of file)
 supabase/
-  migrations/         0001–0022, run in order against a real Supabase project
+  migrations/         0001–0024, run in order against a real Supabase project
   seed/               LOCAL POSTGRES TEST FIXTURES ONLY — do not run against Supabase
 scripts/
   bootstrap-admin.ts  one-time first-admin promotion (service role)
@@ -449,35 +534,41 @@ scripts/
 
 ## Verification performed
 
-- All 22 migrations (`0016`'s Storage-only pieces aside — see note above)
+- All 24 migrations (`0016`'s Storage-only pieces aside — see note above)
   applied cleanly against local PostgreSQL 16, in order, with no errors.
-- Four smoke tests pass end-to-end, run in order (each depends on data from
+- Five smoke tests pass end-to-end, run in order (each depends on data from
   the previous ones): `999_smoke_test.sql` (auth/RBAC/RLS),
   `998_listing_smoke_test.sql` (listings domain),
   `997_inquiries_smoke_test.sql` (public insert + auto-assignment +
-  visibility scoping, including the anon-cannot-RETURNING discovery), and
+  visibility scoping, including the anon-cannot-RETURNING discovery),
   `996_automation_smoke_test.sql` (Phase 5: trigger → event → job creation,
   idempotency, the RPC-forgery attempt blocked, atomic claiming, the full
   retry→backoff→dead-letter lifecycle, stuck-job reclamation, and
-  notifications RLS/column lockdown).
-- Beyond the dedicated smoke test, Phase 5's pipeline was also verified
-  *organically*: running the pre-existing 999/998/997 suites with the new
-  triggers active produced exactly the automation_events/sync_jobs you'd
-  expect from their existing scenarios (registrations, approvals, listing
-  submissions/publishes/price changes, inquiries, viewing requests) — real
-  application flows exercising the automation layer, not just a synthetic
-  test written to match the implementation.
+  notifications RLS/column lockdown), and `995_google_sheets_smoke_test.sql`
+  (Phase 6: no job is queued while `DISCONNECTED`; exactly one job queued
+  once `CONNECTED`, carrying the correct denormalized payload; changing the
+  spreadsheet target resets `status` to `DISCONNECTED`; an ordinary agent is
+  blocked from connecting a sheet or calling `reconcile_google_sheets()`;
+  reconciliation force-requeues every eligible listing).
+- Beyond the dedicated smoke tests, both Phase 5's and Phase 6's pipelines
+  were also verified *organically*: running the pre-existing suites with
+  the new triggers active produced exactly the automation_events/sync_jobs
+  you'd expect from their existing scenarios — real application flows
+  exercising the automation layer, not just a synthetic test written to
+  match the implementation.
 - `npm run typecheck` and `npm run lint` both pass with zero errors/warnings.
 - `npm run build` (production build, which type-checks and compiles every
   route including dynamic `[id]`/`[slug]` segments regardless of runtime
-  redirects) passes cleanly after every phase — 28 routes as of this one.
+  redirects) passes cleanly after every phase — 31 routes as of this one.
 - Every protected route (`(dashboard)`, `/admin/*`, `/inquiries`,
-  `/viewings`, `/notifications`, `/pending-approval`) correctly
-  307-redirects unauthenticated requests to `/login?next=...`; every public
-  route (`/`, `/properties`, `/for-rent`, `/for-sale`, `/about`, `/contact`)
-  does not redirect (verified against a running dev server). This only
-  proves the redirect layer, not that a page renders correctly once past
-  it — that's what the production build check covers instead.
+  `/viewings`, `/notifications`, `/pending-approval`, including
+  `/organizations/[id]` specifically for this phase's new settings section)
+  correctly 307-redirects unauthenticated requests to `/login?next=...`;
+  every public route (`/`, `/properties`, `/for-rent`, `/for-sale`,
+  `/about`, `/contact`) does not redirect (verified against a running dev
+  server). This only proves the redirect layer, not that a page renders
+  correctly once past it — that's what the production build check covers
+  instead.
 - `/properties/does-not-exist` correctly 404s rather than crashing.
 - `/api/cron/process-jobs` correctly 401s with no `Authorization` header and
   with a wrong secret, and — with the correct secret — actually attempts its
@@ -485,12 +576,18 @@ scripts/
   Supabase URL, the same known limitation as every other data-dependent
   route in this sandbox, not a crash).
 
-What is **not** verified (requires a real Supabase project, which wasn't
+What is **not** verified (requires a real Supabase project and, for this
+phase specifically, a real Google service account + spreadsheet — neither
 provisioned per the build decisions made at the start of this work): actual
 email delivery, the full browser auth flow against real Supabase
-Auth/PostgREST, Storage upload/download against a real bucket, and —
-specific to this phase — actually rendering the public marketplace pages
-with real data in a browser. Pages that query Supabase 500 in this sandbox
-(confirmed via the dev server log: `ECONNREFUSED 127.0.0.1:54321`, the
-placeholder URL) — expected with no backend, not a code defect, and
-consistent with every prior phase's limitation.
+Auth/PostgREST, Storage upload/download against a real bucket, actually
+rendering pages with real data in a browser, and — specific to Phase 6 —
+any real call to the Google Sheets API (`getServiceAccountEmail()` returns
+null and every exported function throws a clear "not configured" error
+with `GOOGLE_SERVICE_ACCOUNT_KEY` unset, which is the behavior verified
+here; the actual HTTP calls in `src/lib/google/sheets.ts` are unexercised
+until a real service account and spreadsheet exist). Pages that query
+Supabase 500 in this sandbox (confirmed via the dev server log:
+`ECONNREFUSED 127.0.0.1:54321`, the placeholder URL) — expected with no
+backend, not a code defect, and consistent with every prior phase's
+limitation.
