@@ -10,6 +10,100 @@ Full requirements: see the project brief this was built from (not included
 in this repo). Build proceeds phase-by-phase; each phase is fully working
 before the next starts — no placeholder CRUD, no fake "synced" statuses.
 
+## Status: Phase 5 — Automation Engine (complete)
+
+The outbox pattern end to end: a DB transaction that changes something
+meaningful (a listing submitted/published/reserved/rented/sold, its price
+changed, its agent reassigned, a user registering/getting approved, an
+inquiry or viewing request coming in) writes `automation_events` +
+`sync_jobs` in the *same transaction*, via triggers — so it can never be
+forgotten by application code, and fires the same way whether the change
+came from a server action, the bootstrap script, or any future admin tool.
+A separate worker claims and processes those jobs asynchronously, with
+retry, backoff, dead-lettering, and full observability.
+
+**Scoped deliberately**: Phase 6/7 (Facebook, Google Sheets) don't exist
+yet — no OAuth, no stored credentials, no way to actually post or sync
+anything external. Rather than have the dispatcher create
+`FACEBOOK_CREATE_POST`/`SHEETS_CREATE_ROW` jobs that would sit forever
+unprocessable, every event above only ever enqueues `SEND_NOTIFICATION`
+jobs — a real, fully-internal job type that proves the entire
+event→job→worker→retry→observability pipeline without manufacturing jobs
+that can never succeed. `job_type`/`platform` are plain text columns
+specifically so Phase 6/7 can introduce new job types without a migration.
+
+- **Schema** (`0019`): `automation_events`, `sync_jobs` (job status enum
+  matching section 30 exactly, unique `idempotency_key`), `integration_logs`,
+  `notifications`. All four are staff-viewable (gated by `audit.view`/
+  `integrations.view`) but writable only through SECURITY DEFINER functions
+  — no direct INSERT/UPDATE/DELETE grant exists for `authenticated`/`anon`
+  on any of them, `notifications` included (a user can only flip their own
+  `read_at`, via the same row-RLS + column-grant combination used for
+  `profiles.status` in Phase 1).
+- **Helper functions** (`0020`): `create_automation_event()`,
+  `enqueue_sync_job()` (idempotent via `ON CONFLICT (idempotency_key) DO
+  NOTHING`), `enqueue_notification_job()`, `notify_users_with_permission()`
+  (mirrors `has_permission()`'s own global-vs-org-scoped semantics — useful
+  since a fresh external registrant usually has no `organization_id` yet).
+  **A privilege-escalation vector closed here, not assumed safe**: Supabase
+  auto-exposes every function with `PUBLIC` execute as an RPC endpoint
+  callable by any authenticated session — these take arbitrary
+  `user_id`/`organization_id` parameters with no internal permission check
+  (unlike `set_listing_status()` etc., which check `has_permission()`
+  internally and are meant to be called directly). Left as default, any
+  logged-in user could forge a notification to any other user via
+  `supabase.rpc('enqueue_notification_job', {...})`. Each is explicitly
+  `REVOKE EXECUTE ... FROM public, authenticated, anon` — verified in the
+  smoke test by attempting exactly that forgery and confirming it's
+  rejected with a real permission-denied error, not just "no button for
+  it in the UI".
+- **Triggers** (`0021`) wiring the events listed above. Each trigger
+  function must itself be `SECURITY DEFINER` (not just the helpers it
+  calls) — a trigger fired by an ordinary user's own UPDATE runs as that
+  role by default, and would otherwise fail calling a function whose
+  EXECUTE was just revoked from that same role.
+- **Worker functions** (`0022`): `claim_next_sync_jobs()` (atomic
+  `SELECT ... FOR UPDATE SKIP LOCKED`, which cannot be expressed through
+  PostgREST's REST API at all — this is the one part of the pipeline that
+  *had* to be a SQL function, not a supabase-js query), `complete_sync_job()`
+  (backoff schedule 1min/5min/15min across `max_attempts` = 4, then
+  `FAILED_REQUIRES_ATTENTION` — matches section 32's example exactly), and
+  `reclaim_stuck_sync_jobs()` (section 77: a worker that dies mid-job
+  between claiming and completing would otherwise leave it `PROCESSING`
+  forever, invisible to future claims).
+- **The worker itself**: `/api/cron/process-jobs`, a secret-protected Route
+  Handler (`CRON_SECRET`, checked as `Authorization: Bearer $CRON_SECRET` —
+  Vercel Cron's own convention, so it works whether Vercel Cron or any
+  other scheduler calls it) using the service-role client. Each run:
+  reclaims stuck jobs, scans `AVAILABLE` listings for a stale/missing
+  `last_verified_at` and enqueues one `LISTING_VERIFICATION_DUE` reminder
+  per listing per day (idempotency key includes the date — a lightweight,
+  honestly-scoped precursor to Phase 8's fuller verification workflow, not
+  a reimplementation of it), then claims and processes a batch of jobs.
+  `notifications.sync_job_id` is `UNIQUE` as a second, schema-level safety
+  net against a worker crash between inserting the notification and
+  marking the job complete ever producing a duplicate.
+- **Minimal notifications UI** — a topbar bell with unread count and
+  `/notifications` (mark one or all read). Deliberately the *only* new UI
+  surface this phase: `automation_events`/`sync_jobs`/`integration_logs`
+  stay backend-only, verified via SQL, until Phase 9 builds the actual
+  Automation Center on top of them — building a second, smaller version of
+  that dashboard now would just be thrown away later.
+
+### Setting up the cron schedule once deployed
+
+Add a `CRON_SECRET` environment variable in your deployment (generate one
+with `openssl rand -hex 32`), then either:
+
+- **Vercel Cron**: add a `vercel.json` with a `crons` entry pointing at
+  `/api/cron/process-jobs` on whatever interval you want (every 1–5
+  minutes is reasonable) — Vercel sends the `Authorization` header
+  automatically once `CRON_SECRET` is set on the project. Not included in
+  this repo yet since there's no deployment to point it at — add it when
+  you deploy.
+- **Any other scheduler**: hit the same URL with
+  `Authorization: Bearer <CRON_SECRET>` on your own interval.
+
 ## Status: Phase 4 — Public Marketplace, Inquiries, Viewings (complete)
 
 Every RLS policy up through Phase 3 was `to authenticated` only — an
@@ -232,7 +326,7 @@ locally with the Supabase CLI, if you have Docker available). You'll need:
 
 In the Supabase SQL Editor (or via the Supabase CLI's `supabase db push`
 against a linked project), run every file in `supabase/migrations/` **in
-order** (`0001` through `0018`). Do not run anything under `supabase/seed/`
+order** (`0001` through `0022`). Do not run anything under `supabase/seed/`
 against a real project — those are local-Postgres-only test fixtures.
 
 Migration `0016` creates the `listing-images` Storage bucket and its
@@ -256,6 +350,7 @@ Fill in:
 NEXT_PUBLIC_SUPABASE_URL=https://<your-project>.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key>
 SUPABASE_SERVICE_ROLE_KEY=<service role key>   # server-only, never expose to the client
+CRON_SECRET=<random secret>                    # server-only; protects /api/cron/process-jobs (Phase 5)
 ```
 
 In your Supabase project's Auth settings, add
@@ -320,17 +415,19 @@ src/
       listings/           card-list w/ status tabs + quick actions, new (manual form /
                            paste-parser), [id]/{overview,images,contacts,history}
       inquiries/, viewings/  internal management for what the public forms create
+      notifications/      bell dropdown target + mark-read (Phase 5)
     (public)/         genuinely public, no auth — proxy.ts defaults here (see note above)
       page.tsx            marketplace homepage (was the old `/` dashboard-redirect)
       properties/         browse/search; [slug]/ property details + Inquire/Schedule
                            Viewing forms + their server actions
       for-rent/, for-sale/  same search component as properties/, forced listing_type
       about/, contact/    minimal static pages
+    api/cron/process-jobs/  the automation worker (Phase 5) — secret-protected Route Handler
     auth/callback/    email-confirmation redirect handler
     pending-approval/ shown to logged-in users awaiting approval
   components/
     ui/               small hand-rolled primitives (button, input, select)
-    nav/, layout/     sidebar, topbar
+    nav/, layout/     sidebar, topbar (topbar now also renders the notification bell)
     public/           property card, search form, gallery, site header/footer
   lib/
     supabase/         browser/server/service-role clients + proxy session refresh
@@ -344,7 +441,7 @@ src/
   types/database.ts   hand-written Supabase Database type (regenerate once
                        a real project exists: see comment at top of file)
 supabase/
-  migrations/         0001–0018, run in order against a real Supabase project
+  migrations/         0001–0022, run in order against a real Supabase project
   seed/               LOCAL POSTGRES TEST FIXTURES ONLY — do not run against Supabase
 scripts/
   bootstrap-admin.ts  one-time first-admin promotion (service role)
@@ -352,27 +449,41 @@ scripts/
 
 ## Verification performed
 
-- All 18 migrations (`0016`'s Storage-only pieces aside — see note above)
+- All 22 migrations (`0016`'s Storage-only pieces aside — see note above)
   applied cleanly against local PostgreSQL 16, in order, with no errors.
-- Three smoke tests pass end-to-end: `999_smoke_test.sql` (auth/RBAC/RLS),
-  `998_listing_smoke_test.sql` (listings domain), and
+- Four smoke tests pass end-to-end, run in order (each depends on data from
+  the previous ones): `999_smoke_test.sql` (auth/RBAC/RLS),
+  `998_listing_smoke_test.sql` (listings domain),
   `997_inquiries_smoke_test.sql` (public insert + auto-assignment +
-  visibility scoping for inquiries/viewings, including the anon-cannot-
-  RETURNING discovery above) — run in that order, each depends on the
-  previous one's data.
+  visibility scoping, including the anon-cannot-RETURNING discovery), and
+  `996_automation_smoke_test.sql` (Phase 5: trigger → event → job creation,
+  idempotency, the RPC-forgery attempt blocked, atomic claiming, the full
+  retry→backoff→dead-letter lifecycle, stuck-job reclamation, and
+  notifications RLS/column lockdown).
+- Beyond the dedicated smoke test, Phase 5's pipeline was also verified
+  *organically*: running the pre-existing 999/998/997 suites with the new
+  triggers active produced exactly the automation_events/sync_jobs you'd
+  expect from their existing scenarios (registrations, approvals, listing
+  submissions/publishes/price changes, inquiries, viewing requests) — real
+  application flows exercising the automation layer, not just a synthetic
+  test written to match the implementation.
 - `npm run typecheck` and `npm run lint` both pass with zero errors/warnings.
 - `npm run build` (production build, which type-checks and compiles every
   route including dynamic `[id]`/`[slug]` segments regardless of runtime
-  redirects) passes cleanly after every phase — 27 routes as of this one.
+  redirects) passes cleanly after every phase — 28 routes as of this one.
 - Every protected route (`(dashboard)`, `/admin/*`, `/inquiries`,
-  `/viewings`, `/pending-approval`) correctly 307-redirects unauthenticated
-  requests to `/login?next=...`; every public route (`/`, `/properties`,
-  `/for-rent`, `/for-sale`, `/about`, `/contact`) does not redirect
-  (verified against a running dev server). This only proves the redirect
-  layer, not that a page renders correctly once past it — that's what the
-  production build check covers instead, and separately, what the next
-  paragraph is honest about not covering.
+  `/viewings`, `/notifications`, `/pending-approval`) correctly
+  307-redirects unauthenticated requests to `/login?next=...`; every public
+  route (`/`, `/properties`, `/for-rent`, `/for-sale`, `/about`, `/contact`)
+  does not redirect (verified against a running dev server). This only
+  proves the redirect layer, not that a page renders correctly once past
+  it — that's what the production build check covers instead.
 - `/properties/does-not-exist` correctly 404s rather than crashing.
+- `/api/cron/process-jobs` correctly 401s with no `Authorization` header and
+  with a wrong secret, and — with the correct secret — actually attempts its
+  real logic (fails only on the expected `ECONNREFUSED` to the placeholder
+  Supabase URL, the same known limitation as every other data-dependent
+  route in this sandbox, not a crash).
 
 What is **not** verified (requires a real Supabase project, which wasn't
 provisioned per the build decisions made at the start of this work): actual

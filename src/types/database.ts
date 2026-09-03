@@ -69,6 +69,15 @@ export type InquiryStatus =
 
 export type ViewingStatus = 'REQUESTED' | 'CONFIRMED' | 'RESCHEDULED' | 'COMPLETED' | 'CANCELLED';
 
+export type SyncJobStatus =
+  | 'QUEUED'
+  | 'PROCESSING'
+  | 'SUCCESS'
+  | 'FAILED'
+  | 'RETRY_SCHEDULED'
+  | 'CANCELLED'
+  | 'FAILED_REQUIRES_ATTENTION';
+
 // supabase-js's generic helpers (GenericTable) require a Relationships array
 // even when we aren't declaring any foreign-table joins for `.select()`.
 type NoRelationships = { Relationships: [] };
@@ -529,6 +538,85 @@ export interface Database {
           preferred_time: string | null;
         }>;
       } & NoRelationships;
+      automation_events: {
+        Row: {
+          id: string;
+          organization_id: string | null;
+          event_type: string;
+          resource_type: string;
+          resource_id: string | null;
+          actor_id: string | null;
+          payload: Record<string, unknown>;
+          created_at: string;
+        };
+        Insert: never; // written only by create_automation_event()
+        Update: never;
+      } & NoRelationships;
+      sync_jobs: {
+        Row: {
+          id: string;
+          organization_id: string | null;
+          listing_id: string | null;
+          event_id: string | null;
+          job_type: string;
+          platform: string;
+          payload: Record<string, unknown>;
+          status: SyncJobStatus;
+          priority: number;
+          attempt_count: number;
+          max_attempts: number;
+          next_retry_at: string | null;
+          idempotency_key: string;
+          last_error: string | null;
+          created_at: string;
+          started_at: string | null;
+          completed_at: string | null;
+          locked_at: string | null;
+        };
+        Insert: never; // written only by enqueue_sync_job()
+        Update: never; // status transitions only via complete_sync_job()/claim_next_sync_jobs()
+      } & NoRelationships;
+      integration_logs: {
+        Row: {
+          id: string;
+          sync_job_id: string | null;
+          organization_id: string | null;
+          level: string;
+          event: string;
+          message: string | null;
+          metadata: Record<string, unknown>;
+          created_at: string;
+        };
+        Insert: never; // written only by claim_next_sync_jobs()/complete_sync_job()
+        Update: never;
+      } & NoRelationships;
+      notifications: {
+        Row: {
+          id: string;
+          user_id: string;
+          organization_id: string | null;
+          type: string;
+          title: string;
+          body: string | null;
+          link: string | null;
+          sync_job_id: string | null;
+          read_at: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          organization_id?: string | null;
+          type: string;
+          title: string;
+          body?: string | null;
+          link?: string | null;
+          sync_job_id?: string | null;
+        };
+        // Only read_at is client-settable (marking a notification read) —
+        // matches the column grant in migration 0019.
+        Update: Partial<{ read_at: string | null }>;
+      } & NoRelationships;
     };
     Views: Record<string, never>;
     Functions: {
@@ -572,6 +660,70 @@ export interface Database {
         Args: { p_listing_id: string; p_agent_id: string | null };
         Returns: Database['public']['Tables']['listings']['Row'];
       };
+      // The following are revoked from authenticated/anon (0020, 0022) —
+      // callable only by the service-role worker, never via a user session's
+      // supabase.rpc(). Typed here for the worker's own use.
+      create_automation_event: {
+        Args: {
+          p_organization_id: string | null;
+          p_event_type: string;
+          p_resource_type: string;
+          p_resource_id: string | null;
+          p_actor_id: string | null;
+          p_payload?: Record<string, unknown>;
+        };
+        Returns: string;
+      };
+      enqueue_sync_job: {
+        Args: {
+          p_organization_id: string | null;
+          p_listing_id: string | null;
+          p_event_id: string | null;
+          p_job_type: string;
+          p_platform: string;
+          p_payload: Record<string, unknown>;
+          p_idempotency_key: string;
+        };
+        Returns: string | null;
+      };
+      enqueue_notification_job: {
+        Args: {
+          p_user_id: string;
+          p_organization_id: string | null;
+          p_event_id: string | null;
+          p_type: string;
+          p_title: string;
+          p_body: string | null;
+          p_link: string | null;
+          p_idempotency_suffix: string;
+        };
+        Returns: string | null;
+      };
+      notify_users_with_permission: {
+        Args: {
+          p_permission: string;
+          p_organization_id: string | null;
+          p_event_id: string | null;
+          p_type: string;
+          p_title: string;
+          p_body: string | null;
+          p_link: string | null;
+          p_idempotency_suffix: string;
+        };
+        Returns: undefined;
+      };
+      claim_next_sync_jobs: {
+        Args: { p_limit?: number };
+        Returns: Database['public']['Tables']['sync_jobs']['Row'][];
+      };
+      complete_sync_job: {
+        Args: { p_job_id: string; p_success: boolean; p_error?: string | null };
+        Returns: Database['public']['Tables']['sync_jobs']['Row'];
+      };
+      reclaim_stuck_sync_jobs: {
+        Args: { p_stuck_after?: string };
+        Returns: number;
+      };
     };
     Enums: {
       organization_status: OrganizationStatus;
@@ -586,6 +738,7 @@ export interface Database {
       preferred_contact_method: PreferredContactMethod;
       inquiry_status: InquiryStatus;
       viewing_status: ViewingStatus;
+      sync_job_status: SyncJobStatus;
     };
     CompositeTypes: Record<string, never>;
   };
