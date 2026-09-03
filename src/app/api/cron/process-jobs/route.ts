@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createServiceRoleClient } from '@/lib/supabase/server';
 import { upsertListingRow, type ListingRowData } from '@/lib/google/sheets';
+import { upsertListingPost, type ListingPostData } from '@/lib/facebook/graph';
 
 // Section 77: "Never expose the cron endpoint publicly without
 // authentication. Use secret verification." Vercel Cron sends
@@ -190,6 +191,90 @@ async function processSheetsUpsertRowJob(
   if (connectionError) throw connectionError;
 }
 
+interface FacebookUpsertPostPayload {
+  page_id: string;
+  listing_id: string;
+  listing_number: string;
+  status: string;
+  listing_type: string;
+  property_name: string;
+  bedrooms: number | null;
+  bathrooms: number | null;
+  monthly_rent: number | null;
+  selling_price: number | null;
+  city: string | null;
+  province: string | null;
+  slug: string;
+}
+
+async function processFacebookUpsertPostJob(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  job: { id: string; organization_id: string | null; payload: Record<string, unknown> }
+) {
+  const payload = job.payload as unknown as FacebookUpsertPostPayload;
+  if (!job.organization_id) throw new Error('FACEBOOK_UPSERT_POST job is missing organization_id');
+
+  // access_token is REVOKEd from authenticated/anon at the column level
+  // (migration 0025) — this select only ever returns real data for the
+  // service-role client used here, never for a user session.
+  const { data: connection, error: connectionFetchError } = await supabase
+    .from('facebook_page_connections')
+    .select('access_token')
+    .eq('organization_id', job.organization_id)
+    .maybeSingle();
+  if (connectionFetchError) throw connectionFetchError;
+  if (!connection?.access_token) throw new Error('No Facebook access token configured for this organization');
+
+  // Section 27's mapping idea, applied to Facebook: edit the existing post
+  // instead of creating a duplicate one for the same listing.
+  const { data: existingRecord } = await supabase
+    .from('facebook_post_records')
+    .select('post_id')
+    .eq('organization_id', job.organization_id)
+    .eq('listing_id', payload.listing_id)
+    .maybeSingle();
+
+  const postData: ListingPostData = {
+    propertyName: payload.property_name,
+    listingNumber: payload.listing_number,
+    status: payload.status,
+    listingType: payload.listing_type,
+    monthlyRent: payload.monthly_rent,
+    sellingPrice: payload.selling_price,
+    city: payload.city,
+    province: payload.province,
+    bedrooms: payload.bedrooms,
+    bathrooms: payload.bathrooms,
+    listingUrl: listingUrlFor(payload.slug),
+  };
+
+  const { postId } = await upsertListingPost(payload.page_id, connection.access_token, existingRecord?.post_id ?? null, postData);
+
+  const { error: recordError } = await supabase.from('facebook_post_records').upsert(
+    {
+      organization_id: job.organization_id,
+      listing_id: payload.listing_id,
+      post_id: postId,
+      last_synced_at: new Date().toISOString(),
+    },
+    { onConflict: 'organization_id,listing_id' }
+  );
+  if (recordError) throw recordError;
+
+  // Mirrors the Sheets handler: a prior failure may have flagged the
+  // connection ERROR; a subsequent success should clear it.
+  const { error: connectionUpdateError } = await supabase
+    .from('facebook_page_connections')
+    .update({
+      status: 'CONNECTED',
+      last_synced_at: new Date().toISOString(),
+      last_checked_at: new Date().toISOString(),
+      last_error: null,
+    })
+    .eq('organization_id', job.organization_id);
+  if (connectionUpdateError) throw connectionUpdateError;
+}
+
 export async function GET(request: Request) {
   if (!isAuthorized(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -214,10 +299,12 @@ export async function GET(request: Request) {
         await processSendNotificationJob(supabase, job as { id: string; payload: Record<string, unknown> });
       } else if (job.job_type === 'SHEETS_UPSERT_ROW') {
         await processSheetsUpsertRowJob(supabase, job as { id: string; organization_id: string | null; payload: Record<string, unknown> });
+      } else if (job.job_type === 'FACEBOOK_UPSERT_POST') {
+        await processFacebookUpsertPostJob(supabase, job as { id: string; organization_id: string | null; payload: Record<string, unknown> });
       } else {
-        // No handler yet for this job_type (e.g. a future FACEBOOK_CREATE_POST
-        // before Phase 7 lands) — fail it through the normal retry/dead-letter
-        // path rather than silently dropping it or crashing the batch.
+        // No handler yet for this job_type (e.g. a future Phase 8 job type)
+        // — fail it through the normal retry/dead-letter path rather than
+        // silently dropping it or crashing the batch.
         throw new Error(`No handler for job_type "${job.job_type}"`);
       }
 
@@ -233,6 +320,12 @@ export async function GET(request: Request) {
       if (job.job_type === 'SHEETS_UPSERT_ROW' && job.organization_id) {
         await supabase
           .from('google_sheet_connections')
+          .update({ status: 'ERROR', last_checked_at: new Date().toISOString(), last_error: message })
+          .eq('organization_id', job.organization_id);
+      }
+      if (job.job_type === 'FACEBOOK_UPSERT_POST' && job.organization_id) {
+        await supabase
+          .from('facebook_page_connections')
           .update({ status: 'ERROR', last_checked_at: new Date().toISOString(), last_error: message })
           .eq('organization_id', job.organization_id);
       }

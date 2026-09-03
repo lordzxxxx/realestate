@@ -667,6 +667,66 @@ export interface Database {
         };
         Update: Partial<{ row_number: number; last_synced_at: string | null }>;
       } & NoRelationships;
+      facebook_page_connections: {
+        // access_token IS included in Row — the worker's service-role client
+        // (which bypasses grants entirely) legitimately reads it via a plain
+        // `.select()` to call the Graph API, so hiding it from the type
+        // would break that real path, not just an unwanted one. The actual
+        // security boundary is the Postgres column-level REVOKE for
+        // authenticated/anon (migration 0025), not this TS type — only
+        // server.ts's service-role client should ever select this column;
+        // an ordinary authenticated request gets it stripped by Postgres
+        // regardless of what the type allows.
+        Row: {
+          organization_id: string;
+          page_id: string | null;
+          page_name: string | null;
+          access_token: string | null;
+          status: 'DISCONNECTED' | 'CONNECTED' | 'ERROR';
+          last_checked_at: string | null;
+          last_synced_at: string | null;
+          last_error: string | null;
+          created_at: string;
+          updated_at: string;
+          updated_by: string | null;
+        };
+        Insert: never; // one row per org, auto-provisioned by trigger (0025)
+        // Same two-disjoint-writes discipline as google_sheet_connections:
+        // changing page_id/access_token resets status, so "save settings"
+        // and "test connection" must be separate calls.
+        Update: Partial<{
+          page_id: string | null;
+          access_token: string | null;
+          page_name: string | null;
+          status: 'DISCONNECTED' | 'CONNECTED' | 'ERROR';
+          last_checked_at: string | null;
+          last_synced_at: string | null;
+          last_error: string | null;
+          updated_by: string | null;
+        }>;
+      } & NoRelationships;
+      facebook_post_records: {
+        Row: {
+          id: string;
+          organization_id: string;
+          listing_id: string;
+          post_id: string;
+          last_synced_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        // Written by direct table access from the worker's service-role
+        // client, like sheet_sync_records — RLS/grants (migration 0025)
+        // block authenticated/anon from ever exercising this shape.
+        Insert: {
+          id?: string;
+          organization_id: string;
+          listing_id: string;
+          post_id: string;
+          last_synced_at?: string | null;
+        };
+        Update: Partial<{ post_id: string; last_synced_at: string | null }>;
+      } & NoRelationships;
     };
     Views: Record<string, never>;
     Functions: {
@@ -780,6 +840,12 @@ export interface Database {
       reconcile_google_sheets: {
         Args: { p_organization_id: string };
         Returns: number;
+      };
+      // Permission-checked internally (migration 0026) — generic retry for
+      // any dead-lettered sync_job, not Facebook-specific.
+      retry_sync_job: {
+        Args: { p_job_id: string };
+        Returns: Database['public']['Tables']['sync_jobs']['Row'];
       };
     };
     Enums: {

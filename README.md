@@ -10,6 +10,102 @@ Full requirements: see the project brief this was built from (not included
 in this repo). Build proceeds phase-by-phase; each phase is fully working
 before the next starts — no placeholder CRUD, no fake "synced" statuses.
 
+## Status: Phase 7 — Facebook Page Integration (complete)
+
+Unlike Phase 6's shared Google service account, a Facebook Page can only be
+posted to with a token authorized for that specific Page — there's no
+platform-level credential that works across every organization. This phase
+deliberately does **not** build a full Facebook Login OAuth flow (a
+registered Meta App, redirect handling, short-lived-to-long-lived token
+exchange, eventual App Review for page permissions — none of it
+exercisable in this sandbox without a real Meta App anyway): an org admin
+pastes their own Page ID and a long-lived Page Access Token, generated
+externally via Meta Business Suite or the Graph API Explorer, same "paste a
+credential you generated yourself" spirit as Phase 6's spreadsheet ID —
+except the token itself is a real secret, which changes the schema design
+in one important way.
+
+- **Schema** (`0025`): `facebook_page_connections` (auto-provisioned per
+  org, like `google_sheet_connections`) and `facebook_post_records`
+  (Listing ID → Facebook post ID mapping, same stable-key idea as Phase 6's
+  `sheet_sync_records`, so an edit updates the existing post's message
+  instead of creating a duplicate). **The one real difference from Phase
+  6**: `access_token` is a live credential, not an identifier, so it gets
+  column-level lockdown on top of the row-level policy — `REVOKE SELECT`
+  entirely, then `GRANT SELECT` back on every column except `access_token`.
+  `UPDATE` stays granted on all columns (Postgres doesn't require `SELECT`
+  on a column to blindly overwrite it), so staff can rotate a token but
+  never read one back — not through this table, not through `.select()`
+  after an update, not at all. Verified in the smoke test as a *Postgres*
+  guarantee, not just an RLS one: even the SUPER_ADMIN, connected as role
+  `authenticated` with global `integrations.manage`, gets `permission
+  denied for table facebook_page_connections` on a bare `SELECT
+  access_token` — RBAC permissions and Postgres column grants are
+  independent layers, and this phase is the first to actually need both at
+  once.
+- **Dispatch trigger** (`0026`) fires on listing insert/update, but with a
+  narrower gate than Sheets: Facebook posting is public marketing, not an
+  internal record, so it only ever fires for a listing that's genuinely
+  publicly visible right now — reusing `is_publicly_visible()` (the exact
+  predicate the public site itself uses, migration `0017`) rather than
+  inventing a second, possibly-diverging definition of "should this be
+  public". Also checks the listing's own `facebook_enabled`/
+  `auto_sync_enabled` toggles and `organization_settings.auto_publish_facebook`.
+- **The real Graph API client** (`src/lib/facebook/graph.ts`) — plain
+  `fetch` calls to Facebook's REST
+  endpoints (no SDK dependency needed: every call here is one form-encoded
+  POST or one query-string GET), `testPageConnection()` (confirms the token
+  actually authorizes *this* Page — a token for a different Page a user
+  manages would otherwise look superficially valid), and
+  `upsertListingPost()` (edits the existing post's message by ID when
+  `facebook_post_records` already has one, otherwise creates a new link
+  post — a Facebook link post's attached URL/preview can't be swapped after
+  creation the way a spreadsheet row can be freely overwritten, so only the
+  caption updates on subsequent edits). The link posted is the property's
+  own public page, so Facebook's link-preview card reuses the OG tags Phase
+  4 already built — no photo upload API needed.
+- **Worker handler** wired into the same cron route as Phase 6, with the
+  same "surface the error on the connection immediately" behavior on
+  failure.
+- **No bulk reconciliation, unlike Phase 6's "Sync all now" — by design,
+  not an oversight**: a spreadsheet row can be safely overwritten
+  repeatedly with zero cost, but a Facebook Post is public and visible to
+  followers. A "post everything now" button would spam a Page with
+  duplicate/near-duplicate posts the moment an org with hundreds of
+  existing listings first connects. Instead: **`retry_sync_job()`**, a
+  small, genuinely generic addition (not Facebook-specific — it's exactly
+  what `integrations.retry`'s own description in `0007` already promised:
+  "Manually retry a failed sync job", a gap that existed since Phase 5 with
+  no way to fill it short of Phase 6's blanket reconcile). Permission-
+  checked internally, and refuses to touch anything that isn't already
+  `FAILED_REQUIRES_ATTENTION` — retrying an in-flight job would race the
+  worker that's already processing it.
+- **A subtle test-writing trap found and fixed while building the smoke
+  test, not a product bug**: the natural way to verify "a plain agent
+  can't retry someone else's dead-lettered job" is to look the job up by
+  its known `idempotency_key` and pass that id to `retry_sync_job()` as
+  that agent. But the agent also lacks `integrations.view`, so
+  `sync_jobs_select`'s RLS policy hides the row from that very lookup —
+  the id resolves to `NULL`, and `retry_sync_job(NULL)` fails with "job not
+  found" rather than a permission error. The test would have silently kept
+  "passing" even if the function's internal permission check were deleted
+  entirely — it just wouldn't have been testing that check anymore. Fixed
+  by capturing job ids into session GUCs (`set_config`/`current_setting`)
+  while still unrestricted, before ever assuming a restricted role's
+  identity — those reads never touch RLS at all, so what fails afterward
+  can only be the permission check.
+- **Settings UI**: a new "Facebook Page integration" section on
+  `/organizations/[id]`, gated by `integrations.view`/
+  `integrations.manage`/`integrations.facebook`, with the access token
+  field always blank on load (the server never sends the real value back —
+  `Row` in `database.ts` legitimately includes `access_token` for the
+  worker's service-role client to read, but every authenticated fetch in
+  application code explicitly names its safe columns and never selects it)
+  and a save action that treats a blank token field as "keep the one
+  already saved" rather than forcing a re-paste on every unrelated edit. A
+  small failed-posts list with per-listing Retry buttons stands in for the
+  bulk reconcile this phase deliberately omits.
+
 ## Status: Phase 6 — Google Sheets Integration (complete)
 
 The `SHEETS_UPSERT_ROW`/`GOOGLE_SHEETS` job type Phase 5 deliberately left
@@ -407,7 +503,7 @@ locally with the Supabase CLI, if you have Docker available). You'll need:
 
 In the Supabase SQL Editor (or via the Supabase CLI's `supabase db push`
 against a linked project), run every file in `supabase/migrations/` **in
-order** (`0001` through `0022`). Do not run anything under `supabase/seed/`
+order** (`0001` through `0026`). Do not run anything under `supabase/seed/`
 against a real project — those are local-Postgres-only test fixtures.
 
 Migration `0016` creates the `listing-images` Storage bucket and its
@@ -433,8 +529,13 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key>
 SUPABASE_SERVICE_ROLE_KEY=<service role key>   # server-only, never expose to the client
 CRON_SECRET=<random secret>                    # server-only; protects /api/cron/process-jobs (Phase 5)
 GOOGLE_SERVICE_ACCOUNT_KEY=<service account JSON, one line>  # server-only (Phase 6); see .env.local.example
-NEXT_PUBLIC_SITE_URL=https://<your-domain>     # used to build absolute listing URLs from background workers
+NEXT_PUBLIC_SITE_URL=https://<your-domain>     # used to build absolute listing/post URLs from background workers
 ```
+
+Facebook Page tokens (Phase 7) are **not** an env var — they're pasted per
+organization into the "Facebook Page integration" section on each org's
+settings page, since (unlike the Google service account) a single
+platform-level credential can't post to every org's own distinct Page.
 
 In your Supabase project's Auth settings, add
 `http://localhost:3000/auth/callback` (and your production URL's
@@ -492,7 +593,8 @@ src/
     (auth)/           login, register, check-email + server actions
     (dashboard)/      protected app shell
       dashboard/          real operational stats (section 41)
-      organizations/      CRUD + settings + Google Sheets integration section (Phase 6)
+      organizations/      CRUD + settings + Google Sheets (Phase 6) + Facebook Page (Phase 7)
+                           integration sections
       admin/approvals/          pending-user review
       admin/listing-approvals/  pending-listing review queue
       listings/           card-list w/ status tabs + quick actions, new (manual form /
@@ -506,7 +608,8 @@ src/
       for-rent/, for-sale/  same search component as properties/, forced listing_type
       about/, contact/    minimal static pages
     api/cron/process-jobs/  the automation worker (Phase 5) — secret-protected Route Handler,
-                             now also handling SHEETS_UPSERT_ROW jobs (Phase 6)
+                             now also handling SHEETS_UPSERT_ROW (Phase 6) and
+                             FACEBOOK_UPSERT_POST (Phase 7) jobs
     auth/callback/    email-confirmation redirect handler
     pending-approval/ shown to logged-in users awaiting approval
   components/
@@ -520,13 +623,14 @@ src/
     listings/         zod schemas (client-facing + server-authoritative), constants,
                        paste-parser, get-listing helper
     google/           Sheets API client (service account JWT), zod schemas (Phase 6)
+    facebook/         Graph API client (page access token, plain fetch), zod schemas (Phase 7)
     public/           search filter parsing, public listing queries (with the
                        is_publicly_visible re-check described above), inquiry/viewing
                        zod schemas
   types/database.ts   hand-written Supabase Database type (regenerate once
                        a real project exists: see comment at top of file)
 supabase/
-  migrations/         0001–0024, run in order against a real Supabase project
+  migrations/         0001–0026, run in order against a real Supabase project
   seed/               LOCAL POSTGRES TEST FIXTURES ONLY — do not run against Supabase
 scripts/
   bootstrap-admin.ts  one-time first-admin promotion (service role)
@@ -534,9 +638,9 @@ scripts/
 
 ## Verification performed
 
-- All 24 migrations (`0016`'s Storage-only pieces aside — see note above)
+- All 26 migrations (`0016`'s Storage-only pieces aside — see note above)
   applied cleanly against local PostgreSQL 16, in order, with no errors.
-- Five smoke tests pass end-to-end, run in order (each depends on data from
+- Six smoke tests pass end-to-end, run in order (each depends on data from
   the previous ones): `999_smoke_test.sql` (auth/RBAC/RLS),
   `998_listing_smoke_test.sql` (listings domain),
   `997_inquiries_smoke_test.sql` (public insert + auto-assignment +
@@ -544,31 +648,44 @@ scripts/
   `996_automation_smoke_test.sql` (Phase 5: trigger → event → job creation,
   idempotency, the RPC-forgery attempt blocked, atomic claiming, the full
   retry→backoff→dead-letter lifecycle, stuck-job reclamation, and
-  notifications RLS/column lockdown), and `995_google_sheets_smoke_test.sql`
+  notifications RLS/column lockdown), `995_google_sheets_smoke_test.sql`
   (Phase 6: no job is queued while `DISCONNECTED`; exactly one job queued
   once `CONNECTED`, carrying the correct denormalized payload; changing the
   spreadsheet target resets `status` to `DISCONNECTED`; an ordinary agent is
   blocked from connecting a sheet or calling `reconcile_google_sheets()`;
-  reconciliation force-requeues every eligible listing).
-- Beyond the dedicated smoke tests, both Phase 5's and Phase 6's pipelines
-  were also verified *organically*: running the pre-existing suites with
-  the new triggers active produced exactly the automation_events/sync_jobs
-  you'd expect from their existing scenarios — real application flows
-  exercising the automation layer, not just a synthetic test written to
-  match the implementation.
+  reconciliation force-requeues every eligible listing), and
+  `994_facebook_smoke_test.sql` (Phase 7: no job queued for a listing that
+  isn't genuinely publicly visible or while `DISCONNECTED`; the
+  column-level `REVOKE` on `access_token` actually blocks a bare `SELECT`
+  as role `authenticated` — proven even for the SUPER_ADMIN, since Postgres
+  grants and RBAC permissions are independent layers; changing the
+  Page/token resets `status` and clears the stale `page_name`;
+  `retry_sync_job()` is permission-checked, refuses a non-dead-lettered
+  job, and — the one test-design trap this phase's own smoke test caught
+  in itself — its permission check is verified using a job id captured via
+  a session GUC rather than a fresh RLS-visible `SELECT`, so a deleted
+  permission check would actually fail the test instead of an RLS-hidden
+  row silently producing the same "blocked" outcome for the wrong reason).
+- Beyond the dedicated smoke tests, Phase 5's, Phase 6's, and Phase 7's
+  pipelines were all also verified *organically*: running the pre-existing
+  suites with the new triggers active produced exactly the
+  automation_events/sync_jobs you'd expect from their existing scenarios —
+  real application flows exercising the automation layer, not just a
+  synthetic test written to match the implementation.
 - `npm run typecheck` and `npm run lint` both pass with zero errors/warnings.
 - `npm run build` (production build, which type-checks and compiles every
   route including dynamic `[id]`/`[slug]` segments regardless of runtime
-  redirects) passes cleanly after every phase — 31 routes as of this one.
+  redirects) passes cleanly after every phase — 31 routes as of this one
+  (Phase 7 added a section to an existing page, not a new route).
 - Every protected route (`(dashboard)`, `/admin/*`, `/inquiries`,
   `/viewings`, `/notifications`, `/pending-approval`, including
-  `/organizations/[id]` specifically for this phase's new settings section)
-  correctly 307-redirects unauthenticated requests to `/login?next=...`;
-  every public route (`/`, `/properties`, `/for-rent`, `/for-sale`,
-  `/about`, `/contact`) does not redirect (verified against a running dev
-  server). This only proves the redirect layer, not that a page renders
-  correctly once past it — that's what the production build check covers
-  instead.
+  `/organizations/[id]`, which now also carries the Facebook settings
+  section) correctly 307-redirects unauthenticated requests to
+  `/login?next=...`; every public route (`/`, `/properties`, `/for-rent`,
+  `/for-sale`, `/about`, `/contact`) does not redirect (verified against a
+  running dev server). This only proves the redirect layer, not that a
+  page renders correctly once past it — that's what the production build
+  check covers instead.
 - `/properties/does-not-exist` correctly 404s rather than crashing.
 - `/api/cron/process-jobs` correctly 401s with no `Authorization` header and
   with a wrong secret, and — with the correct secret — actually attempts its
@@ -576,17 +693,23 @@ scripts/
   Supabase URL, the same known limitation as every other data-dependent
   route in this sandbox, not a crash).
 
-What is **not** verified (requires a real Supabase project and, for this
-phase specifically, a real Google service account + spreadsheet — neither
-provisioned per the build decisions made at the start of this work): actual
-email delivery, the full browser auth flow against real Supabase
-Auth/PostgREST, Storage upload/download against a real bucket, actually
-rendering pages with real data in a browser, and — specific to Phase 6 —
-any real call to the Google Sheets API (`getServiceAccountEmail()` returns
-null and every exported function throws a clear "not configured" error
-with `GOOGLE_SERVICE_ACCOUNT_KEY` unset, which is the behavior verified
-here; the actual HTTP calls in `src/lib/google/sheets.ts` are unexercised
-until a real service account and spreadsheet exist). Pages that query
+What is **not** verified (requires a real Supabase project and, for these
+phases specifically, a real Google service account + spreadsheet and a real
+Facebook Page + Page Access Token — none provisioned per the build
+decisions made at the start of this work): actual email delivery, the full
+browser auth flow against real Supabase Auth/PostgREST, Storage
+upload/download against a real bucket, actually rendering pages with real
+data in a browser, any real call to the Google Sheets API
+(`getServiceAccountEmail()` returns null and every exported function
+throws a clear "not configured" error with `GOOGLE_SERVICE_ACCOUNT_KEY`
+unset, which is the behavior verified here; the actual HTTP calls in
+`src/lib/google/sheets.ts` are unexercised until a real service account
+and spreadsheet exist), and — specific to Phase 7 — any real call to the
+Facebook Graph API (no default/placeholder credential exists for it at
+all, by design — every organization starts `DISCONNECTED` with a null
+`access_token` until an admin pastes one in; `src/lib/facebook/graph.ts`'s
+actual HTTP calls are unexercised until a real Page + token exist). Pages
+that query
 Supabase 500 in this sandbox (confirmed via the dev server log:
 `ECONNREFUSED 127.0.0.1:54321`, the placeholder URL) — expected with no
 backend, not a code defect, and consistent with every prior phase's
