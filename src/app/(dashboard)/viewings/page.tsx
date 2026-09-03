@@ -1,13 +1,24 @@
 import { createClient } from '@/lib/supabase/server';
 import { ViewingRow } from './viewing-row';
+import { Pagination } from '@/components/ui/pagination';
+import { DEFAULT_PAGE_SIZE, pageRange, parsePageParam } from '@/lib/pagination';
 
-export default async function ViewingsPage() {
+export default async function ViewingsPage(props: PageProps<'/viewings'>) {
+  const searchParams = await props.searchParams;
+  const page = parsePageParam(searchParams.page);
+  const [from, to] = pageRange(page);
+
   const supabase = await createClient();
 
-  const { data: viewings, error } = await supabase
+  const {
+    data: viewings,
+    error,
+    count,
+  } = await supabase
     .from('viewing_requests')
-    .select('*')
-    .order('created_at', { ascending: false });
+    .select('*', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(from, to);
 
   const listingIds = [...new Set((viewings ?? []).map((v) => v.listing_id))];
   const { data: listings } =
@@ -35,6 +46,8 @@ export default async function ViewingsPage() {
           </p>
         )}
       </div>
+
+      <Pagination page={page} pageSize={DEFAULT_PAGE_SIZE} total={count ?? 0} buildHref={(p) => `/viewings?page=${p}`} />
     </div>
   );
 }

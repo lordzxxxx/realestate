@@ -1,10 +1,24 @@
 import { createClient } from '@/lib/supabase/server';
 import { InquiryRow } from './inquiry-row';
+import { Pagination } from '@/components/ui/pagination';
+import { DEFAULT_PAGE_SIZE, pageRange, parsePageParam } from '@/lib/pagination';
 
-export default async function InquiriesPage() {
+export default async function InquiriesPage(props: PageProps<'/inquiries'>) {
+  const searchParams = await props.searchParams;
+  const page = parsePageParam(searchParams.page);
+  const [from, to] = pageRange(page);
+
   const supabase = await createClient();
 
-  const { data: inquiries, error } = await supabase.from('inquiries').select('*').order('created_at', { ascending: false });
+  const {
+    data: inquiries,
+    error,
+    count,
+  } = await supabase
+    .from('inquiries')
+    .select('*', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(from, to);
 
   const listingIds = [...new Set((inquiries ?? []).map((i) => i.listing_id))];
   const { data: listings } =
@@ -32,6 +46,8 @@ export default async function InquiriesPage() {
           </p>
         )}
       </div>
+
+      <Pagination page={page} pageSize={DEFAULT_PAGE_SIZE} total={count ?? 0} buildHref={(p) => `/inquiries?page=${p}`} />
     </div>
   );
 }

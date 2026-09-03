@@ -3,6 +3,8 @@ import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { getMyPermissions } from '@/lib/auth/permissions';
 import { canAny } from '@/lib/auth/permission-utils';
+import { Pagination } from '@/components/ui/pagination';
+import { DEFAULT_PAGE_SIZE, pageRange, parsePageParam } from '@/lib/pagination';
 
 const RESOURCE_TABS = [
   { key: 'all', label: 'All' },
@@ -50,17 +52,18 @@ export default async function AuditLogPage(props: PageProps<'/admin/audit'>) {
   const activeTab: ResourceTab = RESOURCE_TABS.some((t) => t.key === searchParams.resource)
     ? (searchParams.resource as ResourceTab)
     : 'all';
+  const page = parsePageParam(searchParams.page);
+  const [from, to] = pageRange(page);
 
   const supabase = await createClient();
   let query = supabase
     .from('automation_events')
-    .select('id, event_type, resource_type, resource_id, actor_id, payload, created_at')
-    .order('created_at', { ascending: false })
-    .limit(100);
+    .select('id, event_type, resource_type, resource_id, actor_id, payload, created_at', { count: 'exact' })
+    .order('created_at', { ascending: false });
 
   if (activeTab !== 'all') query = query.eq('resource_type', activeTab);
 
-  const { data: events, error } = await query;
+  const { data: events, error, count } = await query.range(from, to);
 
   const actorIds = [...new Set((events ?? []).map((e) => e.actor_id).filter((id): id is string => Boolean(id)))];
   const { data: actors } = actorIds.length
@@ -74,7 +77,7 @@ export default async function AuditLogPage(props: PageProps<'/admin/audit'>) {
         <h1 className="text-xl font-semibold text-slate-900">Audit Log</h1>
         <p className="text-sm text-slate-500">
           Every meaningful change the automation engine recorded — scoped to what you can see (your organization or
-          the whole platform, depending on your role). The most recent 100 events.
+          the whole platform, depending on your role).
         </p>
       </div>
 
@@ -133,6 +136,13 @@ export default async function AuditLogPage(props: PageProps<'/admin/audit'>) {
           <p className="px-4 py-10 text-center text-sm text-slate-400">No events in this view.</p>
         )}
       </div>
+
+      <Pagination
+        page={page}
+        pageSize={DEFAULT_PAGE_SIZE}
+        total={count ?? 0}
+        buildHref={(p) => (activeTab === 'all' ? `/admin/audit?page=${p}` : `/admin/audit?resource=${activeTab}&page=${p}`)}
+      />
     </div>
   );
 }

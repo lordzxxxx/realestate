@@ -2,7 +2,9 @@ import Link from 'next/link';
 import { Plus } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
 import { Button } from '@/components/ui/button';
+import { Pagination } from '@/components/ui/pagination';
 import { cn } from '@/lib/utils';
+import { DEFAULT_PAGE_SIZE, pageRange, parsePageParam } from '@/lib/pagination';
 import { LISTING_STATUS_LABELS, LISTING_STATUS_STYLES, formatCurrency } from '@/lib/listings/constants';
 import { QuickStatusActions } from './quick-status-actions';
 import type { Listing } from '@/lib/listings/get-listing';
@@ -29,9 +31,11 @@ function isStale(lastVerifiedAt: string | null): boolean {
 export default async function ListingsPage(props: PageProps<'/listings'>) {
   const searchParams = await props.searchParams;
   const activeTab: TabKey = TABS.some((t) => t.key === searchParams.status) ? (searchParams.status as TabKey) : 'all';
+  const page = parsePageParam(searchParams.page);
+  const [from, to] = pageRange(page);
 
   const supabase = await createClient();
-  let query = supabase.from('listings').select('*').order('updated_at', { ascending: false });
+  let query = supabase.from('listings').select('*', { count: 'exact' }).order('updated_at', { ascending: false });
 
   if (activeTab === 'available') query = query.eq('status', 'AVAILABLE');
   else if (activeTab === 'reserved') query = query.eq('status', 'RESERVED');
@@ -48,7 +52,7 @@ export default async function ListingsPage(props: PageProps<'/listings'>) {
     query = query.eq('status', 'AVAILABLE').or(`last_verified_at.is.null,last_verified_at.lt.${cutoff}`);
   }
 
-  const { data: listings, error } = await query;
+  const { data: listings, error, count } = await query.range(from, to);
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
@@ -127,6 +131,13 @@ export default async function ListingsPage(props: PageProps<'/listings'>) {
           </p>
         )}
       </div>
+
+      <Pagination
+        page={page}
+        pageSize={DEFAULT_PAGE_SIZE}
+        total={count ?? 0}
+        buildHref={(p) => (activeTab === 'all' ? `/listings?page=${p}` : `/listings?status=${activeTab}&page=${p}`)}
+      />
     </div>
   );
 }

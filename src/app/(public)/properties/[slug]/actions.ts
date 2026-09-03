@@ -2,14 +2,29 @@
 
 import { createClient } from '@/lib/supabase/server';
 import { inquirySchema, viewingRequestSchema, type InquiryInput, type ViewingRequestInput } from '@/lib/public/inquiry-schemas';
+import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
 
 export interface ActionResult {
   error?: string;
 }
 
+// 5 submissions per 10 minutes per IP, per form — enough for someone
+// genuinely inquiring about several properties, not enough for a script.
+const RATE_LIMIT_MAX = 5;
+const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+
+function rateLimitedMessage(retryAfterSeconds: number): string {
+  const minutes = Math.ceil(retryAfterSeconds / 60);
+  return `Too many submissions from this connection. Please try again in about ${minutes} minute${minutes === 1 ? '' : 's'}.`;
+}
+
 export async function createInquiryAction(listingId: string, input: InquiryInput): Promise<ActionResult> {
   const parsed = inquirySchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input' };
+
+  const ip = await getClientIp();
+  const rateLimit = checkRateLimit(`inquiry:${ip}`, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  if (!rateLimit.allowed) return { error: rateLimitedMessage(rateLimit.retryAfterSeconds ?? 60) };
 
   const supabase = await createClient();
 
@@ -35,6 +50,10 @@ export async function createInquiryAction(listingId: string, input: InquiryInput
 export async function createViewingRequestAction(listingId: string, input: ViewingRequestInput): Promise<ActionResult> {
   const parsed = viewingRequestSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input' };
+
+  const ip = await getClientIp();
+  const rateLimit = checkRateLimit(`viewing:${ip}`, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  if (!rateLimit.allowed) return { error: rateLimitedMessage(rateLimit.retryAfterSeconds ?? 60) };
 
   const supabase = await createClient();
 

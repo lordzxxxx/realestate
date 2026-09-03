@@ -44,8 +44,28 @@ export default async function AutomationCenterPage() {
 
   const supabase = await createClient();
 
-  const [{ data: statusRows }, { data: deadLetterJobs, error: jobsError }, { data: logs }] = await Promise.all([
-    supabase.from('sync_jobs').select('status'),
+  // Counted with a HEAD request per status (7 tiny COUNTs, each backed by
+  // sync_jobs_status_next_retry_idx's leading `status` column) rather than
+  // `select('status')` with no limit — sync_jobs has no retention/cleanup,
+  // so it only ever grows, and pulling every row just to tally them in
+  // Node would eventually mean shipping the entire job history over the
+  // wire on every page load.
+  const STATUS_LIST: SyncJobStatus[] = [
+    'QUEUED',
+    'PROCESSING',
+    'RETRY_SCHEDULED',
+    'SUCCESS',
+    'FAILED',
+    'CANCELLED',
+    'FAILED_REQUIRES_ATTENTION',
+  ];
+
+  const [statusCounts, { data: deadLetterJobs, error: jobsError }, { data: logs }] = await Promise.all([
+    Promise.all(
+      STATUS_LIST.map((status) =>
+        supabase.from('sync_jobs').select('*', { count: 'exact', head: true }).eq('status', status)
+      )
+    ),
     supabase
       .from('sync_jobs')
       .select('id, organization_id, job_type, platform, payload, last_error, attempt_count, created_at')
@@ -68,7 +88,9 @@ export default async function AutomationCenterPage() {
     CANCELLED: 0,
     FAILED_REQUIRES_ATTENTION: 0,
   };
-  for (const row of statusRows ?? []) counts[row.status] += 1;
+  STATUS_LIST.forEach((status, i) => {
+    counts[status] = statusCounts[i].count ?? 0;
+  });
 
   const orgIds = [
     ...new Set(

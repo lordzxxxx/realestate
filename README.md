@@ -7,8 +7,86 @@ Sheets, notifications) is layered on top in later phases without ever
 becoming the source of truth itself.
 
 Full requirements: see the project brief this was built from (not included
-in this repo). Build proceeds phase-by-phase; each phase is fully working
-before the next starts — no placeholder CRUD, no fake "synced" statuses.
+in this repo). Build proceeded phase-by-phase; each phase was fully
+working before the next started — no placeholder CRUD, no fake "synced"
+statuses. **All 10 planned phases are now complete** (see `## Status`
+sections below, newest first, for what each one actually built and
+verified — and each phase's own honest account of what stayed
+unverifiable without a real Supabase project). What's left is exactly
+what `DEPLOYMENT.md` describes: provisioning a real backend and running
+through its go-live checklist.
+
+## Status: Phase 10 — Production Security, Performance, QA, Deployment (complete)
+
+The final phase — all 10 are now complete. This one hardens what the
+previous nine built rather than adding new features, and produces the
+[`DEPLOYMENT.md`](./DEPLOYMENT.md) runbook someone actually deploying this
+needs. See that file's "Known scaling considerations" for what's
+deliberately deferred rather than silently absent.
+
+- **Security headers + CSP** (`next.config.ts`) — a static, nonce-free CSP
+  (Content-Security-Policy, X-Frame-Options, X-Content-Type-Options,
+  Referrer-Policy, Permissions-Policy, HSTS). Deliberately *not*
+  nonce-based: a proxy-injected nonce would force every page into dynamic
+  rendering, regressing the static optimization `/login`, `/register`,
+  `/about`, `/contact`, and `/check-email` already get — confirmed
+  unaffected by checking the production build output still marks them
+  static (○) after adding the headers. `img-src`/`connect-src` are scoped
+  to the actual Supabase hostname (parsed from `NEXT_PUBLIC_SUPABASE_URL`
+  at build time) rather than a blanket `https:`, and `next.config.ts` also
+  gained the `images.remotePatterns` entry `next/image` requires for that
+  same host — a real gap found while doing this, since nothing in this
+  sandbox ever loaded a real listing photo through it to surface the
+  error.
+- **Rate limiting** (`src/lib/rate-limit.ts`) — a small in-memory,
+  per-IP, fixed-window limiter (no new infrastructure, per this phase's
+  own scoping decision) applied to every anon-facing mutation: the public
+  inquiry and viewing-request forms (5 per 10 minutes), login (10 per 10
+  minutes — blunts credential stuffing without a per-email limit, which
+  would leak whether an email is registered), and registration (5 per
+  hour — spam here is costlier than a login attempt, since each one
+  creates a real pending profile someone has to review). Its own
+  limitation is stated in the code and in `DEPLOYMENT.md`, not glossed
+  over: this is per-server-process state, so a multi-instance serverless
+  deployment gets a looser *effective* limit than the number suggests —
+  good enough to blunt casual spam, and the upgrade path (Upstash Redis)
+  is documented for when that's not enough.
+- **Missing indexes** (`0028`) — found by reading every `.order()`/`.eq()`
+  call against tables across all 9 previous phases against the indexes
+  already in place, not by guessing: `automation_events`/
+  `integration_logs`/`inquiries`/`viewing_requests`/`listings` all sort by
+  `created_at` (or `updated_at`) with no supporting index anywhere, and
+  the "needs verification" predicate (`status = 'AVAILABLE' and
+  last_verified_at is null or < cutoff`) — which independently appears in
+  the dashboard, the listings page, *and* the Phase 8 reminder cascade —
+  only had a single-column index on `status` before this. Also fixed in
+  the same pass: the Automation Center's job-queue counts were pulling
+  every row in `sync_jobs` (a table with no retention policy, so it only
+  ever grows) into Node just to tally statuses — replaced with seven
+  count-only queries, one per status.
+- **Pagination** — `/listings`, `/admin/audit`, `/inquiries`, and
+  `/viewings` all previously fetched every visible row (or, for the audit
+  log, a fixed cap of 100 with no way to see past it). All four now use
+  plain GET-link pagination (`src/components/ui/pagination.tsx`,
+  `src/lib/pagination.ts`) — no client JS, bookmarkable/shareable URLs,
+  same philosophy as the Phase 4 public search pages.
+- **Responsive QA** — a Playwright pass (Chromium, ad hoc for this
+  verification — not added as a project dependency) screenshotted every
+  page that renders without a live backend (`/login`, `/register`,
+  `/about`, `/contact`, `/check-email`) at phone/tablet/desktop widths and
+  checked for horizontal overflow programmatically. No issues found —
+  Phase 3's mobile-first work on the Agent Portal and consistent Tailwind
+  breakpoint usage throughout held up. Authenticated, data-backed pages
+  couldn't be checked this way for the same reason they can't be manually
+  clicked through: no live Supabase project exists in this sandbox.
+- **Deployment runbook** (`DEPLOYMENT.md`) and `vercel.json` (the cron
+  entry the README has said "add it when you deploy" about since Phase
+  5) — a concrete, in-order sequence: provision Supabase, set every env
+  var, deploy, bootstrap the first admin against the *real* project, then
+  a verification checklist covering everything that was structurally
+  impossible to verify in this sandbox (real email delivery, a real
+  Google Sheets/Facebook connection, the cron job actually firing on
+  schedule).
 
 ## Status: Phase 9 — Reports, Audit, Automation Center (complete)
 
@@ -358,14 +436,16 @@ specifically so Phase 6/7 can introduce new job types without a migration.
 Add a `CRON_SECRET` environment variable in your deployment (generate one
 with `openssl rand -hex 32`), then either:
 
-- **Vercel Cron**: add a `vercel.json` with a `crons` entry pointing at
-  `/api/cron/process-jobs` on whatever interval you want (every 1–5
-  minutes is reasonable) — Vercel sends the `Authorization` header
-  automatically once `CRON_SECRET` is set on the project. Not included in
-  this repo yet since there's no deployment to point it at — add it when
-  you deploy.
+- **Vercel Cron**: `vercel.json` (Phase 10) already has a `crons` entry
+  pointing at `/api/cron/process-jobs` every 5 minutes — Vercel sends the
+  `Authorization` header automatically once `CRON_SECRET` is set on the
+  project. Note Vercel's Hobby plan only allows once-daily cron; every-5-
+  minutes needs Pro (or swap in an external scheduler per the next bullet
+  while staying on Hobby).
 - **Any other scheduler**: hit the same URL with
   `Authorization: Bearer <CRON_SECRET>` on your own interval.
+
+See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for the full go-live sequence.
 
 ## Status: Phase 4 — Public Marketplace, Inquiries, Viewings (complete)
 
@@ -589,7 +669,7 @@ locally with the Supabase CLI, if you have Docker available). You'll need:
 
 In the Supabase SQL Editor (or via the Supabase CLI's `supabase db push`
 against a linked project), run every file in `supabase/migrations/` **in
-order** (`0001` through `0027`). Do not run anything under `supabase/seed/`
+order** (`0001` through `0028`). Do not run anything under `supabase/seed/`
 against a real project — those are local-Postgres-only test fixtures.
 
 Migration `0016` creates the `listing-images` Storage bucket and its
@@ -707,7 +787,8 @@ src/
     auth/callback/    email-confirmation redirect handler
     pending-approval/ shown to logged-in users awaiting approval
   components/
-    ui/               small hand-rolled primitives (button, input, select)
+    ui/               small hand-rolled primitives (button, input, select,
+                       pagination — Phase 10)
     nav/, layout/     sidebar, topbar (topbar now also renders the notification bell)
     public/           property card, search form, gallery, site header/footer
   lib/
@@ -722,18 +803,23 @@ src/
     public/           search filter parsing, public listing queries (with the
                        is_publicly_visible re-check described above), inquiry/viewing
                        zod schemas
+    rate-limit.ts     in-memory per-IP limiter for anon-facing mutations (Phase 10)
+    pagination.ts     shared page/range helpers for the list pages (Phase 10)
   types/database.ts   hand-written Supabase Database type (regenerate once
                        a real project exists: see comment at top of file)
 supabase/
-  migrations/         0001–0027, run in order against a real Supabase project
+  migrations/         0001–0028, run in order against a real Supabase project
   seed/               LOCAL POSTGRES TEST FIXTURES ONLY — do not run against Supabase
 scripts/
   bootstrap-admin.ts  one-time first-admin promotion (service role)
+vercel.json           cron schedule for /api/cron/process-jobs (Phase 10)
+DEPLOYMENT.md          go-live runbook: Supabase setup, env vars, deploy,
+                       bootstrap, verification checklist (Phase 10)
 ```
 
 ## Verification performed
 
-- All 27 migrations (`0016`'s Storage-only pieces aside — see note above)
+- All 28 migrations (`0016`'s Storage-only pieces aside — see note above)
   applied cleanly against local PostgreSQL 16, in order, with no errors.
 - Seven smoke tests pass end-to-end, run in order (each depends on data from
   the previous ones): `999_smoke_test.sql` (auth/RBAC/RLS),
@@ -773,26 +859,50 @@ scripts/
   automation_events/sync_jobs you'd expect from their existing scenarios —
   real application flows exercising the automation layer, not just a
   synthetic test written to match the implementation.
-- Phase 9 adds no migration and no new RLS, so the same 27-migration,
-  seven-smoke-test rebuild above was re-run unchanged after this phase's
-  code landed, confirming no regression — the correct verification for a
-  phase that is entirely new queries over existing, already-tested schema.
+- Phase 9 added no migration and no new RLS, so the same rebuild above was
+  re-run unchanged after that phase's code landed, confirming no
+  regression — the correct verification for a phase that is entirely new
+  queries over existing, already-tested schema.
+- Phase 10 adds one migration (`0028`, indexes only — no new tables, no
+  RLS changes) — the full 28-migration, seven-smoke-test rebuild was
+  re-run after it, still green, and `pg_indexes` was queried directly to
+  confirm all seven new indexes actually exist under their expected names.
 - `npm run typecheck` and `npm run lint` both pass with zero errors/warnings.
 - `npm run build` (production build, which type-checks and compiles every
   route including dynamic `[id]`/`[slug]` segments regardless of runtime
-  redirects) passes cleanly after every phase — 35 routes as of this one
-  (`/reports`, `/admin/audit`, `/admin/automation`, `/api/reports/export`
-  are new; Phases 7 and 8 both added UI to existing pages rather than new
-  routes).
+  redirects) passes cleanly after every phase — still 35 routes (Phase 10
+  hardened existing routes rather than adding any); the build output was
+  specifically checked to confirm `/login`, `/register`, `/about`,
+  `/contact`, and `/check-email` still prerender as static (○) after
+  adding the Phase 10 CSP/security headers, proving the nonce-free
+  approach didn't force them into dynamic rendering.
 - Every protected route (`(dashboard)`, `/admin/*`, `/inquiries`,
   `/viewings`, `/notifications`, `/pending-approval`, `/reports`, and
   `/organizations/[id]`/`/listings/[id]`, which carry earlier phases' UI)
-  correctly 307-redirects unauthenticated requests to `/login?next=...`;
-  every public route (`/`, `/properties`, `/for-rent`, `/for-sale`,
-  `/about`, `/contact`) does not redirect (verified against a running dev
-  server). This only proves the redirect layer, not that a page renders
-  correctly once past it — that's what the production build check covers
-  instead.
+  correctly 307-redirects unauthenticated requests to `/login?next=...` —
+  including with a `?page=N` query string appended (Phase 10's
+  pagination), confirming the redirect logic isn't confused by it; every
+  public route (`/`, `/properties`, `/for-rent`, `/for-sale`, `/about`,
+  `/contact`) does not redirect (verified against a running dev server).
+  This only proves the redirect layer, not that a page renders correctly
+  once past it — that's what the production build check covers instead.
+- `curl -I` against a running dev server confirms the CSP, X-Frame-Options,
+  and Strict-Transport-Security headers are actually present on responses,
+  not just configured and unverified.
+- The Phase 10 rate limiter's fixed-window algorithm was unit-verified in
+  isolation (a standalone script exercising `checkRateLimit()`'s core
+  logic): allows exactly `limit` calls within the window, blocks every
+  call after that with a correct `retryAfterSeconds`. The full server
+  action round-trip (a real anon visitor actually getting blocked)
+  couldn't be exercised end-to-end without a live Supabase project, since
+  Next.js Server Actions aren't a plain REST endpoint `curl` can invoke
+  directly — but the check runs and returns before any Supabase call, so
+  the logic itself is what matters here.
+- A Playwright pass (Chromium, ad hoc — not added as a project dependency)
+  screenshotted `/login`, `/register`, `/about`, `/contact`, and
+  `/check-email` at phone (375px)/tablet (768px)/desktop (1440px) widths
+  and checked `document.documentElement.scrollWidth` against the viewport
+  at each — no horizontal overflow found anywhere.
 - `/properties/does-not-exist` correctly 404s rather than crashing.
 - `/api/cron/process-jobs` correctly 401s with no `Authorization` header and
   with a wrong secret, and — with the correct secret — actually attempts its
@@ -822,8 +932,15 @@ and spreadsheet exist), and — specific to Phase 7 — any real call to the
 Facebook Graph API (no default/placeholder credential exists for it at
 all, by design — every organization starts `DISCONNECTED` with a null
 `access_token` until an admin pastes one in; `src/lib/facebook/graph.ts`'s
-actual HTTP calls are unexercised until a real Page + token exist). Pages
-that query
+actual HTTP calls are unexercised until a real Page + token exist), and —
+specific to Phase 10 — an actual Vercel deployment (`vercel.json`'s cron
+entry has never fired for real), the rate limiter's behavior under Vercel's
+actual multi-instance concurrency (only its single-process algorithm was
+verified — see above), any authenticated/data-backed page's responsive
+behavior on a real device (the Playwright pass covered only the
+backend-independent public pages), and the `DEPLOYMENT.md` runbook itself,
+which is necessarily unexercised until someone actually deploys this.
+Pages that query
 Supabase 500 in this sandbox (confirmed via the dev server log:
 `ECONNREFUSED 127.0.0.1:54321`, the placeholder URL) — expected with no
 backend, not a code defect, and consistent with every prior phase's
