@@ -10,6 +10,47 @@ Full requirements: see the project brief this was built from (not included
 in this repo). Build proceeds phase-by-phase; each phase is fully working
 before the next starts — no placeholder CRUD, no fake "synced" statuses.
 
+## Status: Phase 3 — Approval System, Agent Portal (complete)
+
+Phase 3 is entirely application-layer — no new migrations — since the
+approval RPCs, RLS policies, and permission model it relies on were already
+built (and privilege-escalation-tested) in Phases 1–2. It adds:
+
+- **Listing approval queue** (`/admin/listing-approvals`, gated by
+  `listing.approve`) — every `PENDING_REVIEW` listing the reviewer can see
+  (scoped by the same `listing.read_organization`/`read_all` RLS as
+  everywhere else), oldest-first, with inline Approve & Publish / Request
+  Changes / Reject actions. This is the queue section 2's "Management
+  receives notification → clicks APPROVE & PUBLISH" implies but Phase 2
+  didn't have — reviewing a pending listing previously required already
+  knowing its URL.
+- **Real operational dashboard** (section 41) — replaced the Phase 1
+  placeholder with actual counts (Total/Available/Reserved/Rented+Sold/
+  Pending Review/Needs Verification) and a recent-listings list, all
+  naturally RLS-scoped to what the signed-in user can see. No decorative
+  filler, and no cards for inquiries/viewings/integration health — those
+  don't exist until their phases do, and a fake zero would misrepresent
+  that.
+- **Agent Portal quick actions** (section 40) — the `/listings` list is now
+  a card list (not a table — the previous table would have needed
+  horizontal scroll on a phone, which section 63 explicitly rules out),
+  with status filter tabs (including a "Needs Verification" tab: `AVAILABLE`
+  listings whose `last_verified_at` is null or older than 7 days) and 1–2
+  inline quick-action buttons per listing (Reserve/Mark Rented/Mark Sold/
+  Back to Available) that update status without opening the full listing
+  page. This is a filter, not automation — the actual reminder/notification
+  system for stale listings is Phase 8's job-queue work.
+
+**Not independently re-verified against local Postgres**: the
+`needs_verification` tab's `.or('last_verified_at.is.null,last_verified_at.lt.<cutoff>')`
+filter uses PostgREST's filter-string syntax, which only a running
+PostgREST instance can parse — the local test harness in this repo talks to
+plain Postgres directly via `psql`, with no PostgREST in front of it, so
+this one query is unverified until it runs against a real Supabase
+project. Everything else this phase touches (RLS visibility, the approval
+RPCs) was already covered by the Phase 1–2 smoke tests, which still pass
+unchanged since no migration changed.
+
 ## Status: Phase 2 — Property Domain (complete)
 
 Built and verified in this phase:
@@ -217,10 +258,12 @@ src/
   app/
     (auth)/           login, register, check-email + server actions
     (dashboard)/      protected app shell
-      dashboard/        home
-      organizations/     CRUD + settings
-      admin/approvals/   pending-user review
-      listings/          list, new (manual form / paste-parser), [id]/{overview,images,contacts,history}
+      dashboard/          real operational stats (section 41)
+      organizations/      CRUD + settings
+      admin/approvals/          pending-user review
+      admin/listing-approvals/  pending-listing review queue
+      listings/           card-list w/ status tabs + quick actions, new (manual form /
+                           paste-parser), [id]/{overview,images,contacts,history}
     auth/callback/    email-confirmation redirect handler
     pending-approval/ shown to logged-in users awaiting approval
   components/
