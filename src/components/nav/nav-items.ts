@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react';
-import { LayoutDashboard, Building2, UserCheck, Home, ClipboardCheck } from 'lucide-react';
+import { LayoutDashboard, Building2, UserCheck, Home, ClipboardCheck, MessageSquare, CalendarClock } from 'lucide-react';
 
 export interface NavItem {
   label: string;
@@ -23,6 +23,13 @@ export const NAV_ITEMS: NavItem[] = [
     icon: ClipboardCheck,
     permissions: ['listing.approve'],
   },
+  {
+    label: 'Inquiries',
+    href: '/inquiries',
+    icon: MessageSquare,
+    permissions: ['inquiry.view_own', 'inquiry.view_organization', 'inquiry.view_all'],
+  },
+  { label: 'Viewings', href: '/viewings', icon: CalendarClock, permissions: ['viewing.view', 'viewing.manage'] },
   { label: 'Organizations', href: '/organizations', icon: Building2, permissions: ['organization.view'] },
   { label: 'User Approvals', href: '/admin/approvals', icon: UserCheck, permissions: ['user.approve'] },
 ];

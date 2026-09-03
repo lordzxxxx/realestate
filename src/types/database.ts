@@ -55,6 +55,20 @@ export type ListingContactType = 'OWNER' | 'KEY_HOLDER' | 'REPRESENTATIVE';
 
 export type AmenityKind = 'AMENITY' | 'NEARBY';
 
+export type PreferredContactMethod = 'PHONE' | 'EMAIL' | 'MESSENGER';
+
+export type InquiryStatus =
+  | 'NEW'
+  | 'ASSIGNED'
+  | 'CONTACTED'
+  | 'VIEWING_SCHEDULED'
+  | 'FOLLOW_UP'
+  | 'CONVERTED'
+  | 'LOST'
+  | 'CLOSED';
+
+export type ViewingStatus = 'REQUESTED' | 'CONFIRMED' | 'RESCHEDULED' | 'COMPLETED' | 'CANCELLED';
+
 // supabase-js's generic helpers (GenericTable) require a Relationships array
 // even when we aren't declaring any foreign-table joins for `.select()`.
 type NoRelationships = { Relationships: [] };
@@ -451,6 +465,70 @@ export interface Database {
         Insert: never; // written only by record_listing_revision()
         Update: never;
       } & NoRelationships;
+      inquiries: {
+        Row: {
+          id: string;
+          listing_id: string;
+          organization_id: string;
+          assigned_agent_id: string | null;
+          name: string;
+          phone: string | null;
+          email: string | null;
+          message: string | null;
+          preferred_contact_method: PreferredContactMethod | null;
+          status: InquiryStatus;
+          notes: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        // organization_id/assigned_agent_id/status are set by
+        // handle_new_inquiry() regardless of what's sent (section 37
+        // auto-assignment) — the public form only ever sends these fields.
+        Insert: {
+          id?: string;
+          listing_id: string;
+          name: string;
+          phone?: string | null;
+          email?: string | null;
+          message?: string | null;
+          preferred_contact_method?: PreferredContactMethod | null;
+        };
+        Update: Partial<{ status: InquiryStatus; notes: string | null; assigned_agent_id: string | null }>;
+      } & NoRelationships;
+      viewing_requests: {
+        Row: {
+          id: string;
+          listing_id: string;
+          organization_id: string;
+          assigned_agent_id: string | null;
+          name: string;
+          phone: string | null;
+          email: string | null;
+          preferred_date: string | null;
+          preferred_time: string | null;
+          notes: string | null;
+          status: ViewingStatus;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          listing_id: string;
+          name: string;
+          phone?: string | null;
+          email?: string | null;
+          preferred_date?: string | null;
+          preferred_time?: string | null;
+          notes?: string | null;
+        };
+        Update: Partial<{
+          status: ViewingStatus;
+          notes: string | null;
+          assigned_agent_id: string | null;
+          preferred_date: string | null;
+          preferred_time: string | null;
+        }>;
+      } & NoRelationships;
     };
     Views: Record<string, never>;
     Functions: {
@@ -505,6 +583,9 @@ export interface Database {
       listing_status: ListingStatus;
       listing_contact_type: ListingContactType;
       amenity_kind: AmenityKind;
+      preferred_contact_method: PreferredContactMethod;
+      inquiry_status: InquiryStatus;
+      viewing_status: ViewingStatus;
     };
     CompositeTypes: Record<string, never>;
   };

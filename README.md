@@ -10,6 +10,61 @@ Full requirements: see the project brief this was built from (not included
 in this repo). Build proceeds phase-by-phase; each phase is fully working
 before the next starts — no placeholder CRUD, no fake "synced" statuses.
 
+## Status: Phase 4 — Public Marketplace, Inquiries, Viewings (complete)
+
+Every RLS policy up through Phase 3 was `to authenticated` only — an
+anonymous visitor got zero rows from anything. This phase makes the site
+genuinely public where it should be, without weakening anything else:
+
+- **Routing inverted**: `proxy.ts` used to enumerate public paths and
+  protect everything else; now it enumerates the protected app shell
+  (`/dashboard`, `/listings`, `/organizations`, `/admin`, `/inquiries`,
+  `/viewings`, `/pending-approval`) and defaults everything else — `/`,
+  `/properties`, `/for-rent`, `/for-sale`, `/about`, `/contact` — to public.
+  `/` is now the real marketplace homepage, not a dashboard redirect.
+- **Public RLS** (migration `0017`) — `listings`/`listing_images`/
+  `listing_amenities`/`amenities` get `to public` SELECT policies scoped to
+  an `is_publicly_visible()` predicate: `website_enabled` AND status in
+  (`AVAILABLE`/`RESERVED`/`RENTED`/`SOLD`/`TEMPORARILY_UNAVAILABLE`) — a
+  rented or sold unit's page stays reachable (marked as such), a draft
+  never does. `listing_contacts` (private) is untouched — still
+  authenticated-only.
+- **A subtler leak found and fixed in application code, not SQL**: the
+  property-details query fetches by slug with no status filter and relies
+  on RLS — but RLS is per-session, not per-"is this genuinely public". A
+  logged-in staff member browsing the public site with their own
+  `read_own` access would have their own DRAFT listing render on the
+  public template, since RLS legitimately lets *them* see it. Fixed by
+  having `getPublicListingBySlug()` independently re-check
+  `is_publicly_visible` in application code — the public template now
+  refuses to render anything not actually public, regardless of who's
+  asking.
+- **Inquiries + viewing requests** (migration `0018`) — public (anon)
+  INSERT restricted to publicly-visible listings, with auto-assignment to
+  the listing's `assigned_agent_id` (section 37) via trigger. Internal read/
+  update scoped by `inquiry.view_own`/`view_organization`/`view_all` and
+  `viewing.view`/`manage`/`assign`.
+- **A real Postgres RLS subtlety found via the smoke test, worth knowing
+  for any future anon-insert code**: `INSERT ... RETURNING` requires a
+  SELECT-satisfying policy to hand the row back — anon has no SELECT
+  policy on `inquiries`/`viewing_requests` at all (there's deliberately no
+  public "my inquiries" view), so `RETURNING` failed with "new row
+  violates row-level security policy" even though the `WITH CHECK`
+  condition demonstrably passed in isolation. Every anon insert in this
+  codebase (server actions in `properties/[slug]/actions.ts`) deliberately
+  omits `.select()` for this reason.
+- **Search & browse** — `/properties` (+ `/for-rent`, `/for-sale` sharing
+  the same component with a forced type), filters (name, rent/sale, type,
+  city, bedrooms, price range, furnishing, available-only) and sort
+  (newest/price/recently-verified) via a plain GET form — no client JS
+  required, shareable/bookmarkable URLs, works on slow connections.
+- **Property details page** with photo gallery, unit details, amenities/
+  nearby, generated SEO title/description/OG per section 16, related
+  properties, and the Inquire/Schedule Viewing forms.
+- **Internal Inquiries/Viewings pages** (`/inquiries`, `/viewings`) so the
+  data those public forms create is actually reachable and actionable by
+  staff, not just sitting in the database.
+
 ## Status: Phase 3 — Approval System, Agent Portal (complete)
 
 Phase 3 is entirely application-layer — no new migrations — since the
@@ -177,7 +232,7 @@ locally with the Supabase CLI, if you have Docker available). You'll need:
 
 In the Supabase SQL Editor (or via the Supabase CLI's `supabase db push`
 against a linked project), run every file in `supabase/migrations/` **in
-order** (`0001` through `0016`). Do not run anything under `supabase/seed/`
+order** (`0001` through `0018`). Do not run anything under `supabase/seed/`
 against a real project — those are local-Postgres-only test fixtures.
 
 Migration `0016` creates the `listing-images` Storage bucket and its
@@ -264,21 +319,32 @@ src/
       admin/listing-approvals/  pending-listing review queue
       listings/           card-list w/ status tabs + quick actions, new (manual form /
                            paste-parser), [id]/{overview,images,contacts,history}
+      inquiries/, viewings/  internal management for what the public forms create
+    (public)/         genuinely public, no auth — proxy.ts defaults here (see note above)
+      page.tsx            marketplace homepage (was the old `/` dashboard-redirect)
+      properties/         browse/search; [slug]/ property details + Inquire/Schedule
+                           Viewing forms + their server actions
+      for-rent/, for-sale/  same search component as properties/, forced listing_type
+      about/, contact/    minimal static pages
     auth/callback/    email-confirmation redirect handler
     pending-approval/ shown to logged-in users awaiting approval
   components/
     ui/               small hand-rolled primitives (button, input, select)
     nav/, layout/     sidebar, topbar
+    public/           property card, search form, gallery, site header/footer
   lib/
     supabase/         browser/server/service-role clients + proxy session refresh
     auth/             session lookup, permission checks, zod schemas
     organizations/    zod schemas
     listings/         zod schemas (client-facing + server-authoritative), constants,
                        paste-parser, get-listing helper
+    public/           search filter parsing, public listing queries (with the
+                       is_publicly_visible re-check described above), inquiry/viewing
+                       zod schemas
   types/database.ts   hand-written Supabase Database type (regenerate once
                        a real project exists: see comment at top of file)
 supabase/
-  migrations/         0001–0016, run in order against a real Supabase project
+  migrations/         0001–0018, run in order against a real Supabase project
   seed/               LOCAL POSTGRES TEST FIXTURES ONLY — do not run against Supabase
 scripts/
   bootstrap-admin.ts  one-time first-admin promotion (service role)
@@ -286,22 +352,34 @@ scripts/
 
 ## Verification performed
 
-- All 16 migrations (`0016`'s Storage-only pieces aside — see note above)
+- All 18 migrations (`0016`'s Storage-only pieces aside — see note above)
   applied cleanly against local PostgreSQL 16, in order, with no errors.
-- `supabase/seed/999_smoke_test.sql` and `998_listing_smoke_test.sql` both
-  pass end-to-end — see the scenario list two sections up.
+- Three smoke tests pass end-to-end: `999_smoke_test.sql` (auth/RBAC/RLS),
+  `998_listing_smoke_test.sql` (listings domain), and
+  `997_inquiries_smoke_test.sql` (public insert + auto-assignment +
+  visibility scoping for inquiries/viewings, including the anon-cannot-
+  RETURNING discovery above) — run in that order, each depends on the
+  previous one's data.
 - `npm run typecheck` and `npm run lint` both pass with zero errors/warnings.
 - `npm run build` (production build, which type-checks and compiles every
-  route including dynamic `[id]` segments regardless of runtime redirects)
-  passes cleanly after every phase.
-- Every route in `(dashboard)` and `pending-approval` correctly 307-redirects
-  unauthenticated requests to `/login?next=...` (verified against a running
-  dev server) — note this only proves the redirect layer, not that a page
-  renders correctly once past it, which is what the production build check
-  above covers instead.
+  route including dynamic `[id]`/`[slug]` segments regardless of runtime
+  redirects) passes cleanly after every phase — 27 routes as of this one.
+- Every protected route (`(dashboard)`, `/admin/*`, `/inquiries`,
+  `/viewings`, `/pending-approval`) correctly 307-redirects unauthenticated
+  requests to `/login?next=...`; every public route (`/`, `/properties`,
+  `/for-rent`, `/for-sale`, `/about`, `/contact`) does not redirect
+  (verified against a running dev server). This only proves the redirect
+  layer, not that a page renders correctly once past it — that's what the
+  production build check covers instead, and separately, what the next
+  paragraph is honest about not covering.
+- `/properties/does-not-exist` correctly 404s rather than crashing.
 
 What is **not** verified (requires a real Supabase project, which wasn't
 provisioned per the build decisions made at the start of this work): actual
 email delivery, the full browser auth flow against real Supabase
-Auth/PostgREST, Storage upload/download against a real bucket, and the UI
-rendering with real data end-to-end in a browser.
+Auth/PostgREST, Storage upload/download against a real bucket, and —
+specific to this phase — actually rendering the public marketplace pages
+with real data in a browser. Pages that query Supabase 500 in this sandbox
+(confirmed via the dev server log: `ECONNREFUSED 127.0.0.1:54321`, the
+placeholder URL) — expected with no backend, not a code defect, and
+consistent with every prior phase's limitation.

@@ -2,12 +2,28 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 import type { Database } from '@/types/database';
 
-const PUBLIC_PATHS = ['/login', '/register', '/auth', '/check-email'];
+// Phase 4 made most of the site genuinely public (marketplace, property
+// details, inquiry/viewing forms) — so instead of enumerating every public
+// path, we enumerate the protected app shell and default everything else to
+// public. Exact-or-subpath match (`/listings` must not also match a future
+// unrelated `/listings-something` route).
+const PROTECTED_PREFIXES = [
+  '/dashboard',
+  '/listings',
+  '/organizations',
+  '/admin',
+  '/pending-approval',
+  '/inquiries',
+  '/viewings',
+];
+
+function isProtectedPath(pathname: string): boolean {
+  return PROTECTED_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
 
 /**
  * Refreshes the Supabase auth session on every request and redirects
- * unauthenticated visitors away from the protected app shell. Public
- * marketplace routes (Phase 4) will be added to PUBLIC_PATHS as they land.
+ * unauthenticated visitors away from the protected app shell.
  */
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });
@@ -34,9 +50,8 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const { pathname } = request.nextUrl;
-  const isPublicPath = PUBLIC_PATHS.some((path) => pathname.startsWith(path));
 
-  if (!user && !isPublicPath && pathname !== '/') {
+  if (!user && isProtectedPath(pathname)) {
     const redirectUrl = new URL('/login', request.url);
     redirectUrl.searchParams.set('next', pathname);
     return NextResponse.redirect(redirectUrl);
