@@ -8,7 +8,9 @@ import { NAV_ITEMS } from './nav-items';
 
 export function Sidebar({ grants }: { grants: PermissionGrant[] }) {
   const pathname = usePathname();
-  const items = NAV_ITEMS.filter((item) => !item.permission || canAny(grants, item.permission));
+  const items = NAV_ITEMS.filter(
+    (item) => !item.permissions || item.permissions.some((p) => canAny(grants, p))
+  );
 
   return (
     <nav className="flex h-full w-56 shrink-0 flex-col gap-1 border-r border-slate-200 bg-white px-3 py-4">
